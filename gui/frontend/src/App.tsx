@@ -1,9 +1,14 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { EventsOn } from '../wailsjs/runtime/runtime';
 import Sidebar from './components/Sidebar';
 import LogPanel from './components/LogPanel';
+import type { LogEntry } from './components/LogPanel';
 import InputBar from './components/InputBar';
 import ReportPanel from './components/ReportPanel';
+import AgentDetailPanel from './components/AgentDetailPanel';
+import type { AgentDetail } from './components/AgentDetailPanel';
+import ProposalPanel from './components/ProposalPanel';
+import type { Proposal } from './components/ProposalPanel';
 import ProjectSetup from './components/ProjectSetup';
 
 import * as WailsApp from '../wailsjs/go/main/App';
@@ -15,21 +20,65 @@ interface AgentStatus {
   isConsumer: boolean;
 }
 
+interface LogEvent {
+  type: 'text' | 'thinking' | 'status';
+  message: string;
+}
+
 export default function App() {
   const [projectOpen, setProjectOpen] = useState(false);
   const [agents, setAgents] = useState<AgentStatus[]>([]);
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
-  const [logs, setLogs] = useState<string[]>(['🎼 Claudestra GUI 시작. 프로젝트를 열거나 생성하세요.']);
+  const [agentDetail, setAgentDetail] = useState<AgentDetail | null>(null);
+  const [showDetail, setShowDetail] = useState(false);
+  const [logs, setLogs] = useState<LogEntry[]>([{ type: 'text', message: '🎼 Claudestra GUI 시작. 프로젝트를 열거나 생성하세요.' }]);
   const [report, setReport] = useState('');
   const [showReport, setShowReport] = useState(false);
   const [running, setRunning] = useState(false);
+  const [proposal, setProposal] = useState<Proposal | null>(null);
+  const [showProposal, setShowProposal] = useState(false);
+  const [executing, setExecuting] = useState(false);
 
-  // 실시간 로그 수신
-  useEffect(() => {
-    EventsOn('log', (msg: string) => {
-      setLogs(prev => [...prev, msg]);
+  // 배치 로그 업데이트 (스트리밍 성능 최적화)
+  const pendingLogs = useRef<LogEntry[]>([]);
+  const flushTimer = useRef<number | null>(null);
+
+  const scheduleFlush = useCallback(() => {
+    if (flushTimer.current !== null) return;
+    flushTimer.current = requestAnimationFrame(() => {
+      flushTimer.current = null;
+      if (pendingLogs.current.length === 0) return;
+      const batch = pendingLogs.current.splice(0);
+      setLogs(prev => [...prev, ...batch]);
     });
   }, []);
+
+  const addLog = useCallback((type: LogEntry['type'], message: string) => {
+    pendingLogs.current.push({ type, message });
+    scheduleFlush();
+  }, [scheduleFlush]);
+
+  // 실시간 이벤트 수신
+  useEffect(() => {
+    const cancelLog = EventsOn('log', (evt: LogEvent | string) => {
+      // 하위 호환: string과 object 모두 처리
+      if (typeof evt === 'string') {
+        addLog('text', evt);
+      } else {
+        addLog((evt.type || 'text') as LogEntry['type'], evt.message);
+      }
+    });
+    const cancelTeam = EventsOn('team-updated', (statuses: AgentStatus[]) => {
+      if (statuses) setAgents(statuses);
+    });
+    return () => {
+      cancelLog();
+      cancelTeam();
+      if (flushTimer.current !== null) {
+        cancelAnimationFrame(flushTimer.current);
+      }
+    };
+  }, [addLog]);
 
   const refreshStatuses = useCallback(async () => {
     try {
@@ -38,42 +87,92 @@ export default function App() {
     } catch {}
   }, []);
 
-  const handleInit = useCallback(async (dir: string, roles: string[]) => {
+  const handleSelectAgent = useCallback(async (id: string) => {
+    setSelectedAgent(id);
+    setShowReport(false);
     try {
-      await WailsApp.InitProject(dir, roles);
-      setProjectOpen(true);
-      setLogs(prev => [...prev, `✅ 프로젝트 초기화 완료: ${dir}`]);
-      await refreshStatuses();
-    } catch (e: any) {
-      setLogs(prev => [...prev, `❌ 초기화 실패: ${e}`]);
+      const detail = await WailsApp.GetAgentDetail(id);
+      if (detail) {
+        setAgentDetail(detail);
+        setShowDetail(true);
+      }
+    } catch {
+      setAgentDetail(null);
     }
-  }, [refreshStatuses]);
+  }, []);
+
+  const handleInit = useCallback(async (dir: string) => {
+    try {
+      await WailsApp.InitProject(dir);
+      setProjectOpen(true);
+      addLog('text', `✅ 프로젝트 준비 완료: ${dir}`);
+      addLog('text', '요구사항을 입력하면 팀장이 분석 후 실행 계획을 제안합니다.');
+    } catch (e: any) {
+      addLog('text', `❌ 초기화 실패: ${e}`);
+    }
+  }, [addLog]);
 
   const handleOpen = useCallback(async (dir: string) => {
     try {
       await WailsApp.OpenProject(dir);
       setProjectOpen(true);
-      setLogs(prev => [...prev, `✅ 프로젝트 열기 완료: ${dir}`]);
+      addLog('text', `✅ 프로젝트 열기 완료: ${dir}`);
       await refreshStatuses();
     } catch (e: any) {
-      setLogs(prev => [...prev, `❌ 프로젝트 열기 실패: ${e}`]);
+      addLog('text', `❌ 프로젝트 열기 실패: ${e}`);
     }
-  }, [refreshStatuses]);
+  }, [addLog, refreshStatuses]);
 
+  // 1단계: 계획 수립 요청
   const handleSubmit = useCallback(async (input: string) => {
     setRunning(true);
-    setLogs(prev => [...prev, `\n📝 요청: ${input}`]);
+    addLog('text', `\n📝 요청: ${input}`);
     try {
-      const result = await WailsApp.SubmitRequest(input);
-      setReport(result);
-      setShowReport(true);
-      setLogs(prev => [...prev, '\n✅ 작업 완료 — 보고서를 확인하세요.']);
-      await refreshStatuses();
+      const result = await WailsApp.PlanRequest(input);
+      if (result) {
+        setProposal(result);
+        setShowProposal(true);
+        setShowReport(false);
+        setShowDetail(false);
+        addLog('text', '[팀장] 실행 계획을 수립했습니다. 검토 후 실행을 승인해주세요.');
+      }
     } catch (e: any) {
-      setLogs(prev => [...prev, `❌ 오류: ${e}`]);
+      const errStr = String(e);
+      if (errStr.startsWith('DIRECT_REPLY:')) {
+        const reply = errStr.slice('DIRECT_REPLY:'.length);
+        setReport(reply);
+        setShowReport(true);
+        addLog('text', '[팀장] 💬 ' + reply.slice(0, 100) + (reply.length > 100 ? '...' : ''));
+      } else {
+        addLog('text', `❌ 오류: ${e}`);
+      }
     }
     setRunning(false);
-  }, [refreshStatuses]);
+  }, [addLog]);
+
+  // 2단계: 승인 후 실행
+  const handleExecute = useCallback(async () => {
+    setExecuting(true);
+    setShowProposal(false);
+    addLog('text', '\n[팀장] 실행 승인됨. 작업을 시작합니다...');
+    try {
+      const result = await WailsApp.ExecutePlan();
+      setReport(result);
+      setShowReport(true);
+      addLog('text', '\n✅ 작업 완료 — 보고서를 확인하세요.');
+      await refreshStatuses();
+    } catch (e: any) {
+      addLog('text', `❌ 실행 오류: ${e}`);
+    }
+    setExecuting(false);
+    setProposal(null);
+  }, [addLog, refreshStatuses]);
+
+  const handleCancelProposal = useCallback(() => {
+    setShowProposal(false);
+    setProposal(null);
+    addLog('text', '[사용자] 실행 취소.');
+  }, [addLog]);
 
   const handleSelectDir = useCallback(async () => {
     try {
@@ -97,7 +196,7 @@ export default function App() {
     <div style={{ display: 'flex', height: '100%' }}>
       <Sidebar
         agents={agents}
-        onSelectAgent={setSelectedAgent}
+        onSelectAgent={handleSelectAgent}
         selectedAgent={selectedAgent}
       />
 
@@ -118,7 +217,7 @@ export default function App() {
           <div style={{ display: 'flex', gap: 8 }}>
             {report && (
               <button
-                onClick={() => setShowReport(!showReport)}
+                onClick={() => { setShowReport(!showReport); setShowDetail(false); }}
                 style={{
                   padding: '4px 12px',
                   borderRadius: 4,
@@ -139,13 +238,29 @@ export default function App() {
         <LogPanel logs={logs} />
 
         {/* 입력 */}
-        <InputBar onSubmit={handleSubmit} disabled={running} />
+        <InputBar onSubmit={handleSubmit} disabled={running || executing} />
+
+        {/* 실행 계획 제안 패널 */}
+        <ProposalPanel
+          proposal={proposal}
+          visible={showProposal}
+          onExecute={handleExecute}
+          onCancel={handleCancelProposal}
+          executing={executing}
+        />
 
         {/* 보고서 패널 */}
         <ReportPanel
           report={report}
-          visible={showReport}
+          visible={showReport && !showProposal}
           onClose={() => setShowReport(false)}
+        />
+
+        {/* 에이전트 상세 패널 */}
+        <AgentDetailPanel
+          detail={agentDetail}
+          visible={showDetail && !showReport && !showProposal}
+          onClose={() => { setShowDetail(false); setSelectedAgent(null); }}
         />
       </div>
     </div>

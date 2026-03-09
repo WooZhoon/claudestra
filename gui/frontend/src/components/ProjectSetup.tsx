@@ -1,22 +1,13 @@
 import { useState } from 'react';
 
 interface ProjectSetupProps {
-  onInit: (dir: string, roles: string[]) => void;
+  onInit: (dir: string) => void;
   onOpen: (dir: string) => void;
   onSelectDir: () => Promise<string>;
 }
 
-const availableRoles = ['backend', 'frontend', 'db', 'reviewer', 'doc_writer'];
-
 export default function ProjectSetup({ onInit, onOpen, onSelectDir }: ProjectSetupProps) {
   const [dir, setDir] = useState('');
-  const [selectedRoles, setSelectedRoles] = useState<string[]>(['backend', 'frontend', 'db', 'reviewer']);
-
-  const toggleRole = (role: string) => {
-    setSelectedRoles(prev =>
-      prev.includes(role) ? prev.filter(r => r !== role) : [...prev, role]
-    );
-  };
 
   const handleSelectDir = async () => {
     const selected = await onSelectDir();
@@ -39,11 +30,14 @@ export default function ProjectSetup({ onInit, onOpen, onSelectDir }: ProjectSet
         border: '1px solid var(--border)',
       }}>
         <h1 style={{ fontSize: 24, marginBottom: 4, color: 'var(--accent)' }}>🎼 Claudestra</h1>
-        <p style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 24 }}>
+        <p style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 8 }}>
           Multi-Agent Orchestration System
         </p>
+        <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 24 }}>
+          팀장이 요구사항을 분석하여 필요한 팀원을 자동으로 구성합니다.
+        </p>
 
-        <div style={{ marginBottom: 16 }}>
+        <div style={{ marginBottom: 20 }}>
           <label style={{ fontSize: 12, color: 'var(--text-muted)', display: 'block', marginBottom: 6 }}>
             프로젝트 디렉토리
           </label>
@@ -79,36 +73,10 @@ export default function ProjectSetup({ onInit, onOpen, onSelectDir }: ProjectSet
           </div>
         </div>
 
-        <div style={{ marginBottom: 20 }}>
-          <label style={{ fontSize: 12, color: 'var(--text-muted)', display: 'block', marginBottom: 8 }}>
-            팀원 구성
-          </label>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-            {availableRoles.map(role => (
-              <button
-                key={role}
-                onClick={() => toggleRole(role)}
-                style={{
-                  padding: '6px 12px',
-                  borderRadius: 6,
-                  border: selectedRoles.includes(role) ? '1px solid var(--accent)' : '1px solid var(--border)',
-                  background: selectedRoles.includes(role) ? 'var(--accent)' : 'var(--bg-tertiary)',
-                  color: selectedRoles.includes(role) ? '#1a1b26' : 'var(--text-secondary)',
-                  cursor: 'pointer',
-                  fontSize: 12,
-                  fontWeight: selectedRoles.includes(role) ? 600 : 400,
-                }}
-              >
-                {role}
-              </button>
-            ))}
-          </div>
-        </div>
-
         <div style={{ display: 'flex', gap: 8 }}>
           <button
-            onClick={() => dir && onInit(dir, selectedRoles)}
-            disabled={!dir || selectedRoles.length === 0}
+            onClick={() => dir && onInit(dir)}
+            disabled={!dir}
             style={{
               flex: 1,
               padding: '10px',
@@ -119,7 +87,7 @@ export default function ProjectSetup({ onInit, onOpen, onSelectDir }: ProjectSet
               fontSize: 14,
               fontWeight: 600,
               cursor: 'pointer',
-              opacity: (!dir || selectedRoles.length === 0) ? 0.5 : 1,
+              opacity: !dir ? 0.5 : 1,
             }}
           >
             새 프로젝트

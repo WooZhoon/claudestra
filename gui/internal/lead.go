@@ -11,6 +11,44 @@ import (
 	"sync"
 )
 
+// extractJSON extracts JSON content from text that may contain analysis + ```json block.
+// Falls back to finding first [ or { if no fenced block.
+func extractJSON(raw string) string {
+	// 1. ```json 블록에서 추출
+	re := regexp.MustCompile("(?s)```json\\s*\n(.*?)\\s*```")
+	if m := re.FindStringSubmatch(raw); len(m) > 1 {
+		return strings.TrimSpace(m[1])
+	}
+	// 2. ``` 블록 (언어 미지정)
+	re2 := regexp.MustCompile("(?s)```\\s*\n(\\[.*?\\])\\s*```")
+	if m := re2.FindStringSubmatch(raw); len(m) > 1 {
+		return strings.TrimSpace(m[1])
+	}
+	// 3. 폴백: 첫 번째 [ ... ] 또는 { ... } 찾기
+	if idx := strings.Index(raw, "["); idx >= 0 {
+		return strings.TrimSpace(raw[idx:])
+	}
+	if idx := strings.Index(raw, "{"); idx >= 0 {
+		return strings.TrimSpace(raw[idx:])
+	}
+	return raw
+}
+
+// extractYAML extracts YAML content from text that may contain analysis + ```yaml block.
+func extractYAML(raw string) string {
+	re := regexp.MustCompile("(?s)```ya?ml\\s*\n(.*?)\\s*```")
+	if m := re.FindStringSubmatch(raw); len(m) > 1 {
+		return strings.TrimSpace(m[1])
+	}
+	// 폴백: ``` 블록 제거
+	re2 := regexp.MustCompile("(?s)```\\w*\\s*|\\s*```")
+	cleaned := strings.TrimSpace(re2.ReplaceAllString(raw, ""))
+	if cleaned != "" {
+		return cleaned
+	}
+	return raw
+}
+
 const leadIdea = `당신은 소프트웨어 개발 팀의 팀장 AI입니다.
 당신의 역할은:
 1. 사용자의 요구사항을 분석합니다.
@@ -48,26 +86,141 @@ type AgentInfo struct {
 	Status string `json:"status"`
 }
 
+// ── 세션 메모리 ──
+
+type OpenIssue struct {
+	ID          string `json:"id"`
+	FoundBy     string `json:"found_by"`
+	Severity    string `json:"severity"`
+	Description string `json:"description"`
+	File        string `json:"file"`
+	Status      string `json:"status"` // "open" or "resolved"
+}
+
+type ConversationTurn struct {
+	Role    string `json:"role"` // "user" or "lead"
+	Content string `json:"content"`
+}
+
+type Session struct {
+	ProjectSummary      string             `json:"project_summary"`
+	CompletedTasks      []string           `json:"completed_tasks"`
+	OpenIssues          []OpenIssue        `json:"open_issues"`
+	RecentConversations []ConversationTurn `json:"recent_conversations"`
+}
+
 // ── LeadAgent ──
 
 type LeadAgent struct {
 	WorkDir     string
 	Agents      map[string]*Agent
-	lastContext string // 대화 메모리
+	session     *Session
+	activeLogFn LogFunc // 현재 활성화된 로그 콜백 (streaming용)
 	mu          sync.Mutex
+}
+
+// SetLogFn sets the active log callback for streaming output.
+// Call with nil to disable streaming.
+func (l *LeadAgent) SetLogFn(fn LogFunc) {
+	l.activeLogFn = fn
 }
 
 func NewLeadAgent(workDir string) *LeadAgent {
 	os.MkdirAll(workDir, 0755)
-	return &LeadAgent{
+	l := &LeadAgent{
 		WorkDir: workDir,
 		Agents:  make(map[string]*Agent),
 	}
+	l.session = l.loadSession()
+	return l
+}
+
+func (l *LeadAgent) sessionPath() string {
+	return filepath.Join(l.WorkDir, ".orchestra", "session.json")
+}
+
+func (l *LeadAgent) loadSession() *Session {
+	data, err := os.ReadFile(l.sessionPath())
+	if err != nil {
+		return &Session{}
+	}
+	var s Session
+	if err := json.Unmarshal(data, &s); err != nil {
+		return &Session{}
+	}
+	return &s
+}
+
+func (l *LeadAgent) saveSession() {
+	dir := filepath.Dir(l.sessionPath())
+	os.MkdirAll(dir, 0755)
+	data, err := json.MarshalIndent(l.session, "", "  ")
+	if err != nil {
+		return
+	}
+	os.WriteFile(l.sessionPath(), data, 0644)
+}
+
+func (l *LeadAgent) addConversation(role, content string) {
+	truncated := content
+	if len(truncated) > 200 {
+		truncated = truncated[:200] + "..."
+	}
+	l.session.RecentConversations = append(l.session.RecentConversations, ConversationTurn{
+		Role:    role,
+		Content: truncated,
+	})
+	// 최근 10턴만 유지
+	if len(l.session.RecentConversations) > 10 {
+		l.session.RecentConversations = l.session.RecentConversations[len(l.session.RecentConversations)-10:]
+	}
+}
+
+func (l *LeadAgent) buildSessionBlock() string {
+	s := l.session
+	if s.ProjectSummary == "" && len(s.CompletedTasks) == 0 && len(s.OpenIssues) == 0 {
+		return ""
+	}
+
+	var parts []string
+
+	if s.ProjectSummary != "" {
+		parts = append(parts, fmt.Sprintf("[프로젝트 현재 상태]\n%s", s.ProjectSummary))
+	}
+
+	if len(s.CompletedTasks) > 0 {
+		// 최근 10개만
+		tasks := s.CompletedTasks
+		if len(tasks) > 10 {
+			tasks = tasks[len(tasks)-10:]
+		}
+		parts = append(parts, fmt.Sprintf("[완료된 작업]\n- %s", strings.Join(tasks, "\n- ")))
+	}
+
+	var openIssues []string
+	for _, issue := range s.OpenIssues {
+		if issue.Status == "open" {
+			openIssues = append(openIssues, fmt.Sprintf("[%s] %s: %s (%s)", issue.Severity, issue.ID, issue.Description, issue.File))
+		}
+	}
+	if len(openIssues) > 0 {
+		parts = append(parts, fmt.Sprintf("[미해결 이슈]\n- %s", strings.Join(openIssues, "\n- ")))
+	}
+
+	if len(s.RecentConversations) > 0 {
+		var convLines []string
+		for _, c := range s.RecentConversations {
+			convLines = append(convLines, fmt.Sprintf("%s: %s", c.Role, c.Content))
+		}
+		parts = append(parts, fmt.Sprintf("[최근 대화]\n%s", strings.Join(convLines, "\n")))
+	}
+
+	return "\n" + strings.Join(parts, "\n\n") + "\n"
 }
 
 func (l *LeadAgent) AddAgent(agent *Agent) {
 	l.Agents[agent.Config.AgentID] = agent
-	fmt.Printf("[팀장] 팀원 추가: %s (id=%s)\n", agent.Config.Role, agent.Config.AgentID)
+	// stdout log (CLI mode only, GUI uses logFn)
 }
 
 func (l *LeadAgent) listAgents() []AgentInfo {
@@ -82,6 +235,107 @@ func (l *LeadAgent) listAgents() []AgentInfo {
 	return agents
 }
 
+// ── 팀 자동 구성 ──
+
+// RolePlan describes a dynamically planned agent role.
+type RolePlan struct {
+	Role        string `json:"role"`
+	Description string `json:"description"`
+	Type        string `json:"type"`      // "producer" or "consumer"
+	Directory   string `json:"directory"` // working directory name
+}
+
+// PlanTeam asks Claude to analyze the request and design a team with appropriate roles.
+func (l *LeadAgent) PlanTeam(userInput string) []RolePlan {
+	contextBlock := l.buildSessionBlock()
+
+	prompt := fmt.Sprintf(`당신은 프로젝트 팀의 팀장입니다.
+사용자의 요구사항과 프로젝트 컨텍스트를 분석하여 최적의 팀을 구성하세요.
+%s
+
+먼저 프로젝트를 분석하세요:
+1. 이 프로젝트가 어떤 도메인/기술 스택인지 파악
+2. 사용자의 요구사항에 어떤 전문가가 필요한지 설명
+3. 각 팀원의 역할과 협업 방식을 설명
+
+분석을 마친 후, 아래 형식의 JSON을 ` + "```json" + ` 블록으로 출력하세요:
+[
+  {"role": "영문_snake_case", "description": "한국어 설명 (3~5줄)\n담당 디렉토리: ./directory/", "type": "producer|consumer", "directory": "영문"}
+]
+
+핵심 규칙:
+- 프로젝트의 실제 도메인에 맞는 역할을 정의하세요. 웹 프로젝트가 아니면 backend/frontend를 쓰지 마세요.
+  예: 로봇/비전 → vision_dev, calibration_eng, build_qa 등
+  예: 모바일 앱 → ios_dev, android_dev, api_server 등
+  예: 데이터 파이프라인 → data_engineer, ml_engineer, infra 등
+- 요구사항에 필요한 역할만 포함하세요. 최소 1명, 최대 8명.
+- producer: 실제 코드나 파일을 작성하는 팀원
+- consumer: 다른 팀원의 결과물을 읽기 전용으로 분석하는 팀원 (리뷰어, QA 등)
+- consumer의 description에는 "읽기 전용으로 다른 팀원의 코드를 참조합니다"를 포함하세요.
+
+[사용자 요구사항]
+%s`, contextBlock, userInput)
+
+	raw := l.callClaude(prompt, 60)
+	if raw == "" {
+		return defaultTeam()
+	}
+
+	jsonStr := extractJSON(raw)
+	var plans []RolePlan
+	if err := json.Unmarshal([]byte(jsonStr), &plans); err != nil {
+		return defaultTeam()
+	}
+
+	// 유효성 검증
+	var valid []RolePlan
+	for _, p := range plans {
+		if p.Role == "" || p.Description == "" || p.Directory == "" {
+			continue
+		}
+		if p.Type != "producer" && p.Type != "consumer" {
+			p.Type = "producer"
+		}
+		valid = append(valid, p)
+	}
+	if len(valid) == 0 {
+		return defaultTeam()
+	}
+	return valid
+}
+
+func defaultTeam() []RolePlan {
+	return []RolePlan{
+		{Role: "developer", Description: "소프트웨어 개발 전문가입니다.\n담당 디렉토리: ./src/\n프로젝트의 핵심 코드를 작성합니다.", Type: "producer", Directory: "src"},
+		{Role: "reviewer", Description: "코드 리뷰 전문가입니다.\n읽기 전용으로 다른 팀원의 코드를 참조합니다.\n담당 디렉토리: ./reviewer/", Type: "consumer", Directory: "reviewer"},
+	}
+}
+
+// IsDevTask asks Claude whether the user input is a development task or not.
+// Used when no team exists yet to avoid unnecessary team creation.
+func (l *LeadAgent) IsDevTask(userInput string) bool {
+	contextBlock := l.buildSessionBlock()
+
+	prompt := fmt.Sprintf(`사용자의 메시지가 소프트웨어 개발/구현/설계 등 실제 코딩 작업이 필요한 요청인지 판단하세요.
+
+먼저 판단 근거를 간단히 설명하세요 (1~2문장).
+그 다음 마지막 줄에 "YES" 또는 "NO"만 적으세요.
+
+규칙:
+- 코드 작성, 구현, 설계, 버그 수정, 프로젝트 생성 등 → YES
+- 파일 읽기, 요약, 질문, 인사, 잡담 등 → NO
+- 세션에 미해결 이슈가 있고 "고쳐줘", "수정해", "이어서" 등이면 → YES
+%s
+[사용자 메시지]
+%s`, contextBlock, userInput)
+
+	result := l.callClaude(prompt, 30)
+	// 마지막 줄에서 YES/NO 추출
+	lines := strings.Split(strings.TrimSpace(result), "\n")
+	lastLine := strings.TrimSpace(lines[len(lines)-1])
+	return strings.ToUpper(lastLine) == "YES"
+}
+
 // ── 핵심: 사용자 입력 처리 ──
 
 // LogFunc is called for real-time log streaming to GUI
@@ -91,6 +345,8 @@ func (l *LeadAgent) Process(userInput string, logFn LogFunc) string {
 	if logFn == nil {
 		logFn = func(msg string) { fmt.Println(msg) }
 	}
+	l.activeLogFn = logFn
+	defer func() { l.activeLogFn = nil }()
 
 	logFn(fmt.Sprintf("\n%s", strings.Repeat("=", 60)))
 	logFn(fmt.Sprintf("[팀장] 사용자 입력 수신: %s", userInput))
@@ -98,18 +354,22 @@ func (l *LeadAgent) Process(userInput string, logFn LogFunc) string {
 
 	// 1. 계획 수립
 	logFn("\n[팀장] 📋 실행 계획 수립 중...")
-	plan := l.decompose(userInput)
+	plan := l.Decompose(userInput)
 	if plan == nil {
 		return "계획 수립에 실패했습니다."
 	}
 	if len(plan) == 0 {
 		logFn("[팀장] 💬 개발 태스크가 아닙니다. 팀장이 직접 응답합니다.")
-		return l.directReply(userInput)
+		reply := l.DirectReply(userInput)
+		l.addConversation("user", userInput)
+		l.addConversation("lead", reply)
+		l.saveSession()
+		return reply
 	}
 
 	// 2. 계약서 생성
 	logFn("\n[팀장] 📜 인터페이스 계약서 작성 중...")
-	contract := l.generateContract(userInput, plan)
+	contract := l.GenerateContract(userInput, plan)
 
 	// 3. 계획 표시
 	l.printPlan(plan, logFn)
@@ -132,7 +392,7 @@ func (l *LeadAgent) Process(userInput string, logFn LogFunc) string {
 		logFn(fmt.Sprintf("📌 %d단계: %s", step.StepNum, step.Title))
 		logFn(strings.Repeat("─", 60))
 
-		results := l.executeStep(step.Tasks)
+		results := l.executeStep(step.Tasks, logFn)
 		for k, v := range results {
 			allResults[k] = v
 		}
@@ -149,7 +409,60 @@ func (l *LeadAgent) Process(userInput string, logFn LogFunc) string {
 	// 6. 최종 보고
 	if len(allResults) > 0 {
 		logFn("\n[팀장] 📝 최종 보고 작성 중...")
-		return l.summarize(userInput, allResults)
+		return l.summarize(userInput, allResults, logFn)
+	}
+	return "실행된 태스크가 없습니다."
+}
+
+// ExecuteApprovedPlan: 사용자가 승인한 계획을 실행합니다.
+func (l *LeadAgent) ExecuteApprovedPlan(userInput string, plan []Step, contract string, logFn LogFunc) string {
+	if logFn == nil {
+		logFn = func(msg string) { fmt.Println(msg) }
+	}
+	l.activeLogFn = logFn
+	defer func() { l.activeLogFn = nil }()
+
+	logFn(fmt.Sprintf("\n%s", strings.Repeat("=", 60)))
+	logFn(fmt.Sprintf("[팀장] 승인된 계획 실행 시작: %s", userInput))
+	logFn(strings.Repeat("=", 60))
+
+	// 계획 표시
+	l.printPlan(plan, logFn)
+
+	// 계약서 주입
+	if contract != "" {
+		l.printContract(contract, logFn)
+		l.saveContract(contract)
+		for _, agent := range l.Agents {
+			agent.Config.Contract = contract
+		}
+	}
+
+	// 웨이브별 실행
+	allResults := make(map[string]string)
+	for _, step := range plan {
+		logFn(fmt.Sprintf("\n%s", strings.Repeat("─", 60)))
+		logFn(fmt.Sprintf("📌 %d단계: %s", step.StepNum, step.Title))
+		logFn(strings.Repeat("─", 60))
+
+		results := l.executeStep(step.Tasks, logFn)
+		for k, v := range results {
+			allResults[k] = v
+		}
+
+		done := 0
+		for aid := range results {
+			if a, ok := l.Agents[aid]; ok && a.Status == StatusDone {
+				done++
+			}
+		}
+		logFn(fmt.Sprintf("\n  ✅ %d단계 완료 (%d/%d 성공)", step.StepNum, done, len(step.Tasks)))
+	}
+
+	// 최종 보고
+	if len(allResults) > 0 {
+		logFn("\n[팀장] 📝 최종 보고 작성 중...")
+		return l.summarize(userInput, allResults, logFn)
 	}
 	return "실행된 태스크가 없습니다."
 }
@@ -183,53 +496,148 @@ func (l *LeadAgent) saveContract(contract string) {
 	dir := filepath.Join(l.WorkDir, ".orchestra", "contracts")
 	os.MkdirAll(dir, 0755)
 	os.WriteFile(filepath.Join(dir, "contract.yaml"), []byte(contract), 0644)
-	fmt.Printf("[팀장] 📜 계약서 저장: %s\n", filepath.Join(dir, "contract.yaml"))
 }
 
-// ── 대화 메모리 ──
+// ── 세션 갱신 ──
 
-func (l *LeadAgent) saveContext(userInput, report string) {
-	truncReport := report
-	if len(truncReport) > 2000 {
-		truncReport = truncReport[:2000]
+// updateSession은 작업 완료 후 세션을 갱신합니다.
+func (l *LeadAgent) updateSession(userInput string, results map[string]string, report string) {
+	// 1. 대화 기록 추가
+	l.addConversation("user", userInput)
+
+	leadSummary := report
+	if len(leadSummary) > 200 {
+		leadSummary = leadSummary[:200] + "..."
+	}
+	l.addConversation("lead", leadSummary)
+
+	// 2. 완료된 태스크 추가
+	for aid, output := range results {
+		agent, ok := l.Agents[aid]
+		if !ok {
+			continue
+		}
+		taskSummary := output
+		if len(taskSummary) > 100 {
+			taskSummary = taskSummary[:100] + "..."
+		}
+		l.session.CompletedTasks = append(l.session.CompletedTasks,
+			fmt.Sprintf("%s: %s", agent.Config.Role, taskSummary))
+	}
+	// 최근 20개만 유지
+	if len(l.session.CompletedTasks) > 20 {
+		l.session.CompletedTasks = l.session.CompletedTasks[len(l.session.CompletedTasks)-20:]
 	}
 
-	prompt := fmt.Sprintf(`아래 보고서에서 핵심 정보만 추출하여 5줄 이내로 요약하세요.
-반드시 포함: 1) 무엇을 만들었는지 2) 해결이 필요한 문제 목록 3) 다음에 해야 할 일
+	// 3. 프로젝트 요약 갱신 (Claude에게 요청)
+	l.refreshProjectSummary(userInput, report)
+
+	// 4. 이슈 추출 (reviewer/consumer 결과에서)
+	l.extractIssues(results)
+
+	l.saveSession()
+}
+
+func (l *LeadAgent) refreshProjectSummary(userInput, report string) {
+	truncReport := report
+	if len(truncReport) > 1500 {
+		truncReport = truncReport[:1500]
+	}
+
+	currentSummary := l.session.ProjectSummary
+	prompt := fmt.Sprintf(`아래 정보를 바탕으로 프로젝트의 현재 상태를 1~2문장으로 요약하세요.
 다른 텍스트 없이 요약만 출력하세요.
 
-[사용자 요청]
+[기존 프로젝트 상태]
 %s
 
-[보고서]
-%s`, userInput, truncReport)
+[이번 요청]
+%s
+
+[이번 결과 보고서]
+%s`, currentSummary, userInput, truncReport)
 
 	result := l.callClaude(prompt, 60)
 	if result != "" {
-		l.lastContext = result
-		return
+		l.session.ProjectSummary = result
 	}
-
-	// 폴백
-	fallback := report
-	if len(fallback) > 500 {
-		fallback = fallback[:500]
-	}
-	l.lastContext = fmt.Sprintf("[이전 요청: %s]\n%s", userInput, fallback)
 }
 
-func (l *LeadAgent) buildContextBlock() string {
-	if l.lastContext == "" {
-		return ""
+func (l *LeadAgent) extractIssues(results map[string]string) {
+	// consumer(리뷰어 등) 결과에서 이슈 추출
+	for aid, output := range results {
+		agent, ok := l.Agents[aid]
+		if !ok || !agent.Config.IsConsumer {
+			continue
+		}
+		if len(output) < 20 {
+			continue
+		}
+
+		truncOutput := output
+		if len(truncOutput) > 1500 {
+			truncOutput = truncOutput[:1500]
+		}
+
+		prompt := fmt.Sprintf(`아래 리뷰 결과에서 발견된 이슈를 JSON 배열로 추출하세요.
+이슈가 없으면 빈 배열 []을 반환하세요.
+반드시 JSON만 출력하세요.
+
+형식:
+[{"id": "issue-NNN", "severity": "high|medium|low", "description": "이슈 설명", "file": "파일경로"}]
+
+[리뷰 결과]
+%s`, truncOutput)
+
+		raw := l.callClaude(prompt, 60)
+		if raw == "" {
+			continue
+		}
+		jsonStr := extractJSON(raw)
+
+		var issues []struct {
+			ID          string `json:"id"`
+			Severity    string `json:"severity"`
+			Description string `json:"description"`
+			File        string `json:"file"`
+		}
+		if err := json.Unmarshal([]byte(jsonStr), &issues); err != nil {
+			continue
+		}
+
+		for _, issue := range issues {
+			l.session.OpenIssues = append(l.session.OpenIssues, OpenIssue{
+				ID:          issue.ID,
+				FoundBy:     agent.Config.Role,
+				Severity:    issue.Severity,
+				Description: issue.Description,
+				File:        issue.File,
+				Status:      "open",
+			})
+		}
 	}
-	return fmt.Sprintf("\n[이전 작업 컨텍스트 — 사용자가 이전 작업을 참조할 수 있습니다]\n%s\n", l.lastContext)
+}
+
+// resolveIssues marks issues as resolved when fix tasks are completed.
+func (l *LeadAgent) resolveIssues(results map[string]string) {
+	// 수정 태스크 완료 후, 관련 이슈를 resolved로 변경
+	for _, issue := range l.session.OpenIssues {
+		if issue.Status != "open" {
+			continue
+		}
+		for _, output := range results {
+			if strings.Contains(output, issue.File) || strings.Contains(output, issue.ID) {
+				issue.Status = "resolved"
+			}
+		}
+	}
 }
 
 // ── 태스크 분해 ──
 
-func (l *LeadAgent) decompose(userInput string) []Step {
+func (l *LeadAgent) Decompose(userInput string) []Step {
 	agentList, _ := json.MarshalIndent(l.listAgents(), "", "  ")
-	contextBlock := l.buildContextBlock()
+	contextBlock := l.buildSessionBlock()
 
 	prompt := fmt.Sprintf(`%s
 
@@ -239,39 +647,42 @@ func (l *LeadAgent) decompose(userInput string) []Step {
 [사용자 요구사항]
 %s
 
-중요 규칙:
-- 개발/구현/설계 등 실제 작업이 필요한 요청만 태스크로 분해하세요.
-- 인사, 잡담, 단순 질문 등 개발 태스크가 아닌 경우 반드시 빈 배열 []만 반환하세요.
-- "안녕", "뭐해?", "고마워" 같은 입력에는 절대 태스크를 생성하지 마세요. []를 반환하세요.
-- 단, "이전 작업 컨텍스트"가 있고, 사용자가 "고쳐줘", "수정해", "해결해" 등 이전 작업을 참조하는 경우에는 개발 태스크입니다. 컨텍스트의 문제점을 기반으로 태스크를 분해하세요.
+먼저 요구사항을 분석하세요:
+1. 이것이 개발 태스크인지 판단 (인사, 잡담, 질문이면 빈 배열)
+2. 개발 태스크라면 어떤 팀원에게 어떤 작업을 배분할지 설명
+3. 작업 간 의존관계를 설명
 
-작업 계획 규칙:
-- 각 태스크에 고유 id를 부여하세요 (예: "t1", "t2", ...).
-- depends_on에 선행 태스크 id를 명시하세요. 의존성이 없으면 빈 배열 [].
-- 시스템이 의존성을 분석하여 자동으로 병렬 실행합니다. 단계 번호는 불필요합니다.
-- 각 instruction은 간결하게 핵심만. 전체 코드가 아닌 핵심 구조만 지시하세요.
+분석을 마친 후, `+"```json"+` 블록으로 결과를 출력하세요.
 
-개발 태스크인 경우에만 아래 형식으로 응답하세요:
+개발 태스크가 아니면:
+`+"```json"+`
+[]
+`+"```"+`
+
+개발 태스크이면:
+`+"```json"+`
 [
   {"id": "t1", "agent_id": "팀원ID", "instruction": "구체적인 지시", "depends_on": []},
-  {"id": "t2", "agent_id": "팀원ID", "instruction": "구체적인 지시", "depends_on": ["t1"]},
-  {"id": "t3", "agent_id": "팀원ID", "instruction": "구체적인 지시", "depends_on": ["t1"]},
-  {"id": "t4", "agent_id": "팀원ID", "instruction": "구체적인 지시", "depends_on": ["t2", "t3"]}
-]`, leadIdea, string(agentList), contextBlock, userInput)
+  {"id": "t2", "agent_id": "팀원ID", "instruction": "구체적인 지시", "depends_on": ["t1"]}
+]
+`+"```"+`
+
+규칙:
+- 세션에 미해결 이슈가 있고 "고쳐줘", "이어서" 등이면 개발 태스크.
+- 각 instruction은 간결하게 핵심만.`, leadIdea, string(agentList), contextBlock, userInput)
 
 	raw := l.callClaude(prompt, 120)
 	if raw == "" {
-		fmt.Println("[팀장] ❌ 태스크 분해 오류")
+		// decompose error - handled by fallback
 		return l.fallbackDecompose(userInput)
 	}
 
 	// JSON 블록 추출
-	re := regexp.MustCompile("(?s)```json\\s*|\\s*```")
-	raw = strings.TrimSpace(re.ReplaceAllString(raw, ""))
+	jsonStr := extractJSON(raw)
 
 	var tasks []RawTask
-	if err := json.Unmarshal([]byte(raw), &tasks); err != nil {
-		fmt.Printf("[팀장] ⚠️  파싱 실패 (%s), 폴백 모드 사용\n", err)
+	if err := json.Unmarshal([]byte(jsonStr), &tasks); err != nil {
+		// parse failed, using fallback
 		return l.fallbackDecompose(userInput)
 	}
 
@@ -363,7 +774,7 @@ func (l *LeadAgent) toposortToSteps(tasks []RawTask) []Step {
 				orphans = append(orphans, taskMap[id])
 			}
 		}
-		fmt.Printf("[팀장] ⚠️  순환 의존성 감지, 남은 태스크를 마지막 웨이브에 추가\n")
+		// cyclic dependency detected, appending orphans to last wave
 		waves = append(waves, orphans)
 	}
 
@@ -386,7 +797,7 @@ func (l *LeadAgent) toposortToSteps(tasks []RawTask) []Step {
 }
 
 func (l *LeadAgent) fallbackDecompose(userInput string) []Step {
-	fmt.Println("[팀장] ⚠️  폴백: 모든 팀원에게 동일 지시 전달")
+	// fallback: sending same instruction to all agents
 	var tasks []StepTask
 	for id, agent := range l.Agents {
 		tasks = append(tasks, StepTask{
@@ -399,12 +810,12 @@ func (l *LeadAgent) fallbackDecompose(userInput string) []Step {
 
 // ── 계약서 생성 ──
 
-func (l *LeadAgent) generateContract(userInput string, plan []Step) string {
+func (l *LeadAgent) GenerateContract(userInput string, plan []Step) string {
 	agentList, _ := json.MarshalIndent(l.listAgents(), "", "  ")
 	planJSON, _ := json.MarshalIndent(plan, "", "  ")
 
 	prompt := fmt.Sprintf(`당신은 소프트웨어 아키텍트입니다.
-아래 프로젝트 계획을 보고, 모든 팀원이 따라야 할 인터페이스 계약서를 YAML 형식으로 작성하세요.
+아래 프로젝트 계획을 보고, 모든 팀원이 따라야 할 인터페이스 계약서를 작성하세요.
 
 [사용자 요구사항]
 %s
@@ -415,31 +826,29 @@ func (l *LeadAgent) generateContract(userInput string, plan []Step) string {
 [팀원 목록]
 %s
 
-계약서에 반드시 포함할 내용:
-1. tech_stack: 사용할 언어, 프레임워크, DB 엔진
-2. naming_conventions: 필드명 규칙 (camelCase/snake_case), 언어 (한글/영문)
-3. api_endpoints: 주요 엔드포인트 목록 (method, path, request/response 필드명)
-4. db_schema: 주요 테이블/컬렉션과 필드명
-5. shared_types: 공유 타입 정의 (예: User, Course 등)
+먼저 프로젝트 구조를 분석하고, 팀원들 간 공유해야 할 인터페이스를 설명하세요.
+그 다음 `+"`"+`yaml 블록으로 계약서를 출력하세요.
 
-규칙:
-- 간결하게 핵심만 작성하세요. 50줄 이내로.
-- YAML만 출력하세요. 마크다운 펜스나 설명 텍스트는 포함하지 마세요.`, userInput, string(planJSON), string(agentList))
+계약서에 포함할 내용 (해당하는 것만):
+1. tech_stack: 사용할 언어, 프레임워크
+2. naming_conventions: 필드명 규칙
+3. api_endpoints 또는 shared_interfaces: 주요 인터페이스
+4. shared_types: 공유 타입 정의
+
+규칙: 간결하게 핵심만. 50줄 이내.`, userInput, string(planJSON), string(agentList))
 
 	raw := l.callClaude(prompt, 120)
 	if raw == "" {
-		fmt.Println("[팀장] ⚠️  계약서 생성 실패, 계약서 없이 진행합니다.")
 		return ""
 	}
 
-	re := regexp.MustCompile("(?s)```ya?ml\\s*|\\s*```")
-	return strings.TrimSpace(re.ReplaceAllString(raw, ""))
+	return extractYAML(raw)
 }
 
 // ── 팀장 직접 응답 ──
 
-func (l *LeadAgent) directReply(userInput string) string {
-	contextBlock := l.buildContextBlock()
+func (l *LeadAgent) DirectReply(userInput string) string {
+	contextBlock := l.buildSessionBlock()
 	prompt := fmt.Sprintf(`당신은 소프트웨어 개발 팀의 팀장입니다.
 사용자의 메시지에 친절하게 한국어로 응답하세요.
 개발 관련 요청이 필요하면 어떤 것을 도와줄 수 있는지 안내해주세요.
@@ -454,20 +863,31 @@ func (l *LeadAgent) directReply(userInput string) string {
 	return "안녕하세요! 개발 관련 요청을 입력해주시면 팀원들에게 배분하여 처리하겠습니다."
 }
 
+// SaveDirectReply saves a non-dev conversation to session.
+func (l *LeadAgent) SaveDirectReply(userInput, reply string) {
+	l.addConversation("user", userInput)
+	l.addConversation("lead", reply)
+	// 프로젝트 요약도 갱신 (파일 읽기 등 중요한 컨텍스트일 수 있음)
+	if l.session.ProjectSummary == "" && len(reply) > 50 {
+		l.refreshProjectSummary(userInput, reply)
+	}
+	l.saveSession()
+}
+
 // ── 단계 실행 ──
 
-func (l *LeadAgent) executeStep(tasks []StepTask) map[string]string {
+func (l *LeadAgent) executeStep(tasks []StepTask, logFn LogFunc) map[string]string {
 	results := make(map[string]string)
 	channels := make(map[string]chan string)
 
 	for _, task := range tasks {
 		agent, ok := l.Agents[task.AgentID]
 		if !ok {
-			fmt.Printf("  ⚠️  알 수 없는 에이전트: %s\n", task.AgentID)
+			// unknown agent, skipping
 			continue
 		}
 		agent.Reset()
-		ch := agent.RunAsync(task.Instruction)
+		ch := agent.RunAsync(task.Instruction, logFn)
 		channels[task.AgentID] = ch
 	}
 
@@ -479,7 +899,7 @@ func (l *LeadAgent) executeStep(tasks []StepTask) map[string]string {
 
 // ── 결과 요약 ──
 
-func (l *LeadAgent) summarize(userInput string, results map[string]string) string {
+func (l *LeadAgent) summarize(userInput string, results map[string]string, logFn ...LogFunc) string {
 	var parts []string
 	for aid, output := range results {
 		if agent, ok := l.Agents[aid]; ok {
@@ -506,19 +926,21 @@ func (l *LeadAgent) summarize(userInput string, results map[string]string) strin
 형식으로 한국어 보고서를 작성하세요.`, userInput, resultsText)
 
 	report := l.callClaude(prompt, 120)
+
 	if report != "" {
-		l.saveContext(userInput, report)
+		l.updateSession(userInput, results, report)
 		return report
 	}
 
 	fallback := fmt.Sprintf("[팀원 결과 요약]\n\n%s", resultsText)
-	l.saveContext(userInput, fallback)
+	l.updateSession(userInput, results, fallback)
 	return fallback
 }
 
 // ── Claude CLI 호출 헬퍼 ──
 
-func (l *LeadAgent) callClaude(prompt string, timeoutSec int) string {
+// callClaudeBlocking: 항상 블로킹 (폴백 전용, 재귀 방지)
+func (l *LeadAgent) callClaudeBlocking(prompt string) string {
 	cmd := exec.Command("claude", "--print", "--dangerously-skip-permissions")
 	cmd.Dir = l.WorkDir
 	cmd.Stdin = strings.NewReader(prompt)
@@ -528,4 +950,58 @@ func (l *LeadAgent) callClaude(prompt string, timeoutSec int) string {
 		return ""
 	}
 	return strings.TrimSpace(string(output))
+}
+
+// callClaude: activeLogFn이 있으면 streaming으로 사고 과정을 보여주면서 결과 리턴.
+// 없으면 블로킹.
+func (l *LeadAgent) callClaude(prompt string, timeoutSec int) string {
+	if l.activeLogFn != nil {
+		return l.callClaudeStream(prompt, timeoutSec, func(text string) {
+			l.activeLogFn("  " + text)
+		})
+	}
+	return l.callClaudeBlocking(prompt)
+}
+
+// callClaudeStream: 실시간 스트리밍 (사용자 대면 응답용)
+// --output-format stream-json + --include-partial-messages 로 토큰 단위 스트리밍
+func (l *LeadAgent) callClaudeStream(prompt string, timeoutSec int, onText func(string)) string {
+	cmd := exec.Command("claude", "-p",
+		"--output-format", "stream-json",
+		"--include-partial-messages",
+		"--verbose",
+		"--dangerously-skip-permissions",
+	)
+	cmd.Dir = l.WorkDir
+	cmd.Stdin = strings.NewReader(prompt)
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return l.callClaudeBlocking(prompt)
+	}
+	cmd.Stderr = nil
+
+	if err := cmd.Start(); err != nil {
+		return l.callClaudeBlocking(prompt)
+	}
+
+	var fullResult string
+	ParseStream(stdout, StreamCallbacks{
+		OnText: func(text string) {
+			if onText != nil {
+				onText(text)
+			}
+		},
+		OnThinking: func(text string) {
+			if onText != nil {
+				onText("💭 " + text)
+			}
+		},
+		OnResult: func(result string) {
+			fullResult = result
+		},
+	})
+
+	cmd.Wait()
+	return strings.TrimSpace(fullResult)
 }

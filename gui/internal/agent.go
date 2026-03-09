@@ -25,14 +25,6 @@ var ProducerTools = []string{"Read", "Write", "Edit", "Glob", "Grep", "Bash"}
 // Consumer (리뷰어 등): 읽기 전용
 var ConsumerTools = []string{"Read", "Glob", "Grep"}
 
-var RoleTools = map[string][]string{
-	"backend":    ProducerTools,
-	"frontend":   ProducerTools,
-	"db":         ProducerTools,
-	"reviewer":   ConsumerTools,
-	"doc_writer": append(ConsumerTools, "Write"),
-}
-
 type AgentConfig struct {
 	AgentID      string
 	Role         string
@@ -41,14 +33,16 @@ type AgentConfig struct {
 	ReadRefs     []string // Consumer 전용 읽기 전용 참조 경로
 	Contract     string   // 인터페이스 계약서
 	AllowedTools []string // 허용 도구 목록
+	IsConsumer   bool     // consumer 유형 여부
 }
 
 type Agent struct {
-	Config       AgentConfig
-	LockRegistry *FileLockRegistry
-	Status       AgentStatus
-	Output       string
-	mu           sync.Mutex
+	Config          AgentConfig
+	LockRegistry    *FileLockRegistry
+	Status          AgentStatus
+	Output          string
+	LastInstruction string
+	mu              sync.Mutex
 }
 
 func NewAgent(config AgentConfig, lockRegistry *FileLockRegistry) *Agent {
@@ -62,11 +56,23 @@ func NewAgent(config AgentConfig, lockRegistry *FileLockRegistry) *Agent {
 	return a
 }
 
-func (a *Agent) Run(instruction string) string {
+func (a *Agent) Run(instruction string, onStream ...func(string)) string {
 	a.mu.Lock()
 	a.Status = StatusRunning
+	a.LastInstruction = instruction
 	a.writeStatus(StatusRunning)
 	a.mu.Unlock()
+
+	var streamFn func(string)
+	if len(onStream) > 0 {
+		streamFn = onStream[0]
+	}
+
+	log := func(msg string) {
+		if streamFn != nil {
+			streamFn(msg)
+		}
+	}
 
 	// 잠금 획득
 	if a.LockRegistry != nil {
@@ -74,16 +80,16 @@ func (a *Agent) Run(instruction string) string {
 			a.Status = StatusError
 			a.writeStatus(StatusError)
 			a.Output = fmt.Sprintf("LOCK CONFLICT: %s", err)
-			fmt.Printf("[%s] 🔒 잠금 충돌: %s\n", a.Config.Role, err)
+			log(fmt.Sprintf("[%s] 🔒 잠금 충돌: %s", a.Config.Role, err))
 			return a.Output
 		}
-		fmt.Printf("[%s] 🔒 잠금 획득: %s/\n", a.Config.Role, filepath.Base(a.Config.WorkDir))
+		log(fmt.Sprintf("[%s] 🔒 잠금 획득: %s/", a.Config.Role, filepath.Base(a.Config.WorkDir)))
 	}
 
 	defer func() {
 		if a.LockRegistry != nil {
 			a.LockRegistry.ReleaseAll(a.Config.AgentID)
-			fmt.Printf("[%s] 🔓 잠금 해제\n", a.Config.Role)
+			log(fmt.Sprintf("[%s] 🔓 잠금 해제", a.Config.Role))
 		}
 	}()
 
@@ -92,10 +98,15 @@ func (a *Agent) Run(instruction string) string {
 	if len(truncated) > 60 {
 		truncated = truncated[:60]
 	}
-	fmt.Printf("\n[%s] 🚀 시작: %s...\n", a.Config.Role, truncated)
+	log(fmt.Sprintf("[%s] 🚀 시작: %s...", a.Config.Role, truncated))
 
-	// claude 명령 구성
-	args := []string{"--print", "--dangerously-skip-permissions"}
+	// claude 명령 구성 (stream-json 모드)
+	args := []string{"-p",
+		"--output-format", "stream-json",
+		"--include-partial-messages",
+		"--verbose",
+		"--dangerously-skip-permissions",
+	}
 	if len(a.Config.AllowedTools) > 0 {
 		args = append(args, "--allowedTools", strings.Join(a.Config.AllowedTools, ","))
 	}
@@ -104,48 +115,63 @@ func (a *Agent) Run(instruction string) string {
 	cmd.Dir = a.Config.WorkDir
 	cmd.Stdin = strings.NewReader(prompt)
 
-	done := make(chan error, 1)
-	var output []byte
-	var cmdErr error
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		a.Status = StatusError
+		a.writeStatus(StatusError)
+		a.Output = fmt.Sprintf("PIPE ERROR: %s", err)
+		return a.Output
+	}
+	cmd.Stderr = nil
+
+	if err := cmd.Start(); err != nil {
+		a.Status = StatusError
+		a.writeStatus(StatusError)
+		a.Output = fmt.Sprintf("START ERROR: %s", err)
+		return a.Output
+	}
+
+	done := make(chan struct{})
+	var fullResult string
 
 	go func() {
-		output, cmdErr = cmd.CombinedOutput()
-		done <- cmdErr
+		defer close(done)
+		ParseStream(stdout, StreamCallbacks{
+			OnText: func(text string) {
+				log(fmt.Sprintf("[%s] %s", a.Config.Role, text))
+			},
+			OnThinking: func(text string) {
+				log(fmt.Sprintf("[%s] 💭 %s", a.Config.Role, text))
+			},
+			OnResult: func(result string) {
+				fullResult = result
+			},
+		})
 	}()
 
 	// 5분 타임아웃
 	select {
 	case <-done:
-		if cmdErr == nil {
-			a.Output = strings.TrimSpace(string(output))
-			a.Status = StatusDone
-			a.writeStatus(StatusDone)
-			fmt.Printf("[%s] ✅ 완료\n", a.Config.Role)
-		} else {
-			a.Output = strings.TrimSpace(string(output))
-			a.Status = StatusError
-			a.writeStatus(StatusError)
-			truncOutput := a.Output
-			if len(truncOutput) > 100 {
-				truncOutput = truncOutput[:100]
-			}
-			fmt.Printf("[%s] ❌ 오류: %s\n", a.Config.Role, truncOutput)
-		}
+		cmd.Wait()
+		a.Output = strings.TrimSpace(fullResult)
+		a.Status = StatusDone
+		a.writeStatus(StatusDone)
+		log(fmt.Sprintf("[%s] ✅ 완료", a.Config.Role))
 	case <-time.After(5 * time.Minute):
 		cmd.Process.Kill()
 		a.Output = "TIMEOUT: 5분 초과"
 		a.Status = StatusError
 		a.writeStatus(StatusError)
-		fmt.Printf("[%s] ⏰ 타임아웃\n", a.Config.Role)
+		log(fmt.Sprintf("[%s] ⏰ 타임아웃", a.Config.Role))
 	}
 
 	return a.Output
 }
 
-func (a *Agent) RunAsync(instruction string) chan string {
+func (a *Agent) RunAsync(instruction string, onStream ...func(string)) chan string {
 	ch := make(chan string, 1)
 	go func() {
-		result := a.Run(instruction)
+		result := a.Run(instruction, onStream...)
 		ch <- result
 	}()
 	return ch
