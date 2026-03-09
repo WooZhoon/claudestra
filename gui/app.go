@@ -425,6 +425,90 @@ func (a *App) GetLocks() map[string]string {
 	return registry.ListLocks()
 }
 
+// ── 단일 세션 모드 (Phase D+E) ──
+
+// RunLeadSession: 팀장이 단일 Claude 세션으로 전체 워크플로를 처리합니다.
+// fsnotify로 .orchestra/logs/ 를 감시하여 sub-agent JSONL 출력을 실시간 전달합니다.
+func (a *App) RunLeadSession(userInput string) string {
+	if a.lead == nil {
+		return "프로젝트를 먼저 열어주세요."
+	}
+
+	logFn := func(msg string) {
+		if len(msg) > 0 && msg[0] == '\x01' {
+			runtime.EventsEmit(a.ctx, "log-append", msg[1:])
+			return
+		}
+		evtType := "text"
+		if strings.Contains(msg, "💭") || strings.Contains(msg, "🔧") || strings.Contains(msg, "📊") {
+			evtType = "thinking"
+		}
+		runtime.EventsEmit(a.ctx, "log", LogEvent{Type: evtType, Message: msg})
+	}
+
+	// 팀이 없으면 기존 방식으로 구성
+	if len(a.agents) == 0 {
+		logFn("[팀장] 🤔 개발 태스크인지 판단 중...")
+		a.lead.SetLogFn(logFn)
+		isDev := a.lead.IsDevTask(userInput)
+		if !isDev {
+			logFn("[팀장] 💬 직접 응답합니다.")
+			reply := a.lead.DirectReply(userInput)
+			a.lead.SaveDirectReply(userInput, reply)
+			a.lead.SetLogFn(nil)
+			return reply
+		}
+		logFn("\n[팀장] 🏗️ 팀을 구성합니다...")
+		plans := a.lead.PlanTeam(userInput)
+		var roles []string
+		for _, p := range plans {
+			roles = append(roles, p.Role)
+		}
+		a.workspace.Init(roles)
+		a.workspace.SaveRolePlans(plans)
+		a.rolePlans = plans
+		a.buildTeamFromPlans(plans)
+		a.lead.SetLogFn(nil)
+		runtime.EventsEmit(a.ctx, "team-updated", a.GetAgentStatuses())
+		logFn(fmt.Sprintf("[팀장] ✅ 팀 구성 완료! %d명", len(plans)))
+	}
+
+	// CLIPath 설정 (빌드된 claudestra 바이너리 위치)
+	if a.lead.CLIPath == "" {
+		// 기본값: workspace 내 또는 실행파일 옆
+		// 실제 배포 시에는 설정 가능하게 할 것
+		a.lead.CLIPath = "claudestra"
+	}
+
+	// fsnotify 로그 감시 시작
+	watcher := internal.NewLogWatcher(a.workspace.LogsDir, func(entry internal.LogEntry) {
+		prefix := fmt.Sprintf("[%s] ", entry.Agent)
+		switch entry.Type {
+		case "thinking":
+			runtime.EventsEmit(a.ctx, "log", LogEvent{Type: "thinking", Message: prefix + "💭 " + entry.Message})
+		case "tool":
+			runtime.EventsEmit(a.ctx, "log", LogEvent{Type: "thinking", Message: prefix + "🔧 " + entry.Message})
+		case "text":
+			runtime.EventsEmit(a.ctx, "log", LogEvent{Type: "text", Message: prefix + entry.Message})
+		case "status":
+			runtime.EventsEmit(a.ctx, "log", LogEvent{Type: "text", Message: prefix + "📌 " + entry.Message})
+			runtime.EventsEmit(a.ctx, "team-updated", a.GetAgentStatuses())
+		}
+	})
+	if err := watcher.Start(); err != nil {
+		logFn(fmt.Sprintf("[팀장] ⚠️ 로그 감시 시작 실패: %s", err))
+	}
+	defer watcher.Stop()
+
+	// 단일 세션 실행
+	result := a.lead.RunLeadSession(userInput, logFn)
+
+	// 상태 갱신
+	runtime.EventsEmit(a.ctx, "team-updated", a.GetAgentStatuses())
+
+	return result
+}
+
 // ── 프로젝트 디렉토리 선택 ──
 
 func (a *App) SelectDirectory() (string, error) {

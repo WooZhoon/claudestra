@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -34,6 +35,15 @@ type AgentConfig struct {
 	Contract     string   // 인터페이스 계약서
 	AllowedTools []string // 허용 도구 목록
 	IsConsumer   bool     // consumer 유형 여부
+	LogPath      string   // JSONL 로그 경로 (.orchestra/logs/{agent}.jsonl) — 비어있으면 기록 안 함
+}
+
+// LogEntry는 JSONL 로그 파일에 기록되는 한 줄의 항목입니다.
+type LogEntry struct {
+	Time    string `json:"time"`
+	Agent   string `json:"agent"`
+	Type    string `json:"type"` // "text", "thinking", "tool", "status"
+	Message string `json:"message"`
 }
 
 type Agent struct {
@@ -66,6 +76,32 @@ func (a *Agent) Run(instruction string, onStream ...func(string)) string {
 	var streamFn func(string)
 	if len(onStream) > 0 {
 		streamFn = onStream[0]
+	}
+
+	// JSONL 로그 파일 (설정된 경우)
+	var logFile *os.File
+	if a.Config.LogPath != "" {
+		os.MkdirAll(filepath.Dir(a.Config.LogPath), 0755)
+		if f, err := os.Create(a.Config.LogPath); err == nil {
+			logFile = f
+			defer logFile.Close()
+		}
+	}
+
+	writeJSONL := func(logType, msg string) {
+		if logFile == nil {
+			return
+		}
+		entry := LogEntry{
+			Time:    time.Now().Format(time.RFC3339),
+			Agent:   a.Config.AgentID,
+			Type:    logType,
+			Message: msg,
+		}
+		if data, err := json.Marshal(entry); err == nil {
+			logFile.Write(append(data, '\n'))
+			logFile.Sync()
+		}
 	}
 
 	log := func(msg string) {
@@ -114,6 +150,8 @@ func (a *Agent) Run(instruction string, onStream ...func(string)) string {
 	cmd := exec.Command("claude", args...)
 	cmd.Dir = a.Config.WorkDir
 	cmd.Stdin = strings.NewReader(prompt)
+	// Claude Code 중첩 세션 방지 환경변수 제거
+	cmd.Env = filterEnv(os.Environ(), "CLAUDECODE")
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -147,6 +185,7 @@ func (a *Agent) Run(instruction string, onStream ...func(string)) string {
 				} else {
 					log("\x01" + text)
 				}
+				writeJSONL("text", text)
 			},
 			OnThinking: func(text string) {
 				textStarted = false
@@ -156,6 +195,7 @@ func (a *Agent) Run(instruction string, onStream ...func(string)) string {
 				} else {
 					log("\x01" + text)
 				}
+				writeJSONL("thinking", text)
 			},
 			OnToolUse: func(toolName string, input string) {
 				textStarted = false
@@ -165,6 +205,7 @@ func (a *Agent) Run(instruction string, onStream ...func(string)) string {
 					msg += ": " + input
 				}
 				log(msg)
+				writeJSONL("tool", toolName+": "+input)
 			},
 			OnResult: func(result string) {
 				textStarted = false
@@ -182,12 +223,14 @@ func (a *Agent) Run(instruction string, onStream ...func(string)) string {
 		a.Status = StatusDone
 		a.writeStatus(StatusDone)
 		log(fmt.Sprintf("[%s] ✅ 완료", a.Config.Role))
+		writeJSONL("status", "DONE")
 	case <-time.After(5 * time.Minute):
 		cmd.Process.Kill()
 		a.Output = "TIMEOUT: 5분 초과"
 		a.Status = StatusError
 		a.writeStatus(StatusError)
 		log(fmt.Sprintf("[%s] ⏰ 타임아웃", a.Config.Role))
+		writeJSONL("status", "TIMEOUT")
 	}
 
 	return a.Output
@@ -237,4 +280,16 @@ func (a *Agent) buildPrompt(instruction string) string {
 func (a *Agent) writeStatus(status AgentStatus) {
 	statusFile := filepath.Join(a.Config.WorkDir, ".agent-status")
 	os.WriteFile(statusFile, []byte(string(status)), 0644)
+}
+
+// filterEnv returns a copy of env with the named variable removed.
+func filterEnv(env []string, name string) []string {
+	prefix := name + "="
+	var filtered []string
+	for _, e := range env {
+		if !strings.HasPrefix(e, prefix) {
+			filtered = append(filtered, e)
+		}
+	}
+	return filtered
 }

@@ -113,6 +113,7 @@ type Session struct {
 
 type LeadAgent struct {
 	WorkDir     string
+	CLIPath     string // claudestra CLI 바이너리 경로
 	Agents      map[string]*Agent
 	session     *Session
 	activeLogFn LogFunc // 현재 활성화된 로그 콜백 (streaming용)
@@ -535,6 +536,9 @@ func (l *LeadAgent) updateSession(userInput string, results map[string]string, r
 	// 4. 이슈 추출 (reviewer/consumer 결과에서)
 	l.extractIssues(results)
 
+	// 5. 수정된 이슈 해결 처리
+	l.resolveIssues(results)
+
 	l.saveSession()
 }
 
@@ -621,13 +625,14 @@ func (l *LeadAgent) extractIssues(results map[string]string) {
 // resolveIssues marks issues as resolved when fix tasks are completed.
 func (l *LeadAgent) resolveIssues(results map[string]string) {
 	// 수정 태스크 완료 후, 관련 이슈를 resolved로 변경
-	for _, issue := range l.session.OpenIssues {
-		if issue.Status != "open" {
+	for i := range l.session.OpenIssues {
+		if l.session.OpenIssues[i].Status != "open" {
 			continue
 		}
 		for _, output := range results {
-			if strings.Contains(output, issue.File) || strings.Contains(output, issue.ID) {
-				issue.Status = "resolved"
+			if strings.Contains(output, l.session.OpenIssues[i].File) ||
+				strings.Contains(output, l.session.OpenIssues[i].ID) {
+				l.session.OpenIssues[i].Status = "resolved"
 			}
 		}
 	}
@@ -1011,6 +1016,7 @@ func (l *LeadAgent) callClaudeBlocking(prompt string, tools []string) string {
 	cmd := exec.Command("claude", args...)
 	cmd.Dir = l.WorkDir
 	cmd.Stdin = strings.NewReader(prompt)
+	cmd.Env = filterEnv(os.Environ(), "CLAUDECODE")
 
 	output, err := cmd.Output()
 	if err != nil {
@@ -1037,6 +1043,7 @@ func (l *LeadAgent) callClaudeStream(prompt string, timeoutSec int, tools []stri
 	cmd := exec.Command("claude", args...)
 	cmd.Dir = l.WorkDir
 	cmd.Stdin = strings.NewReader(prompt)
+	cmd.Env = filterEnv(os.Environ(), "CLAUDECODE")
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -1096,4 +1103,145 @@ func (l *LeadAgent) callClaudeStream(prompt string, timeoutSec int, tools []stri
 
 	cmd.Wait()
 	return strings.TrimSpace(fullResult)
+}
+
+// ── Phase D: 단일 세션 모드 ──
+
+// RunLeadSession은 단일 Claude 세션으로 전체 워크플로를 처리합니다.
+// 기존 Process의 6~8회 Claude 호출을 Lead 1회 + sub-agent N회로 줄입니다.
+// Lead는 claudestra CLI를 Bash 도구로 호출하여 팀 관리, 계약서, 태스크 배분을 수행합니다.
+func (l *LeadAgent) RunLeadSession(userInput string, logFn LogFunc) string {
+	if logFn == nil {
+		logFn = func(msg string) { fmt.Println(msg) }
+	}
+	l.activeLogFn = logFn
+	defer func() { l.activeLogFn = nil }()
+
+	logFn(fmt.Sprintf("\n%s", strings.Repeat("=", 60)))
+	logFn(fmt.Sprintf("[팀장] 단일 세션 시작: %s", userInput))
+	logFn(strings.Repeat("=", 60))
+
+	prompt := l.buildLeadSessionPrompt(userInput)
+
+	args := []string{"-p",
+		"--output-format", "stream-json",
+		"--include-partial-messages",
+		"--verbose",
+		"--dangerously-skip-permissions",
+		"--allowedTools", "Bash,Read,Glob,Grep",
+	}
+
+	cmd := exec.Command("claude", args...)
+	cmd.Dir = l.WorkDir
+	cmd.Stdin = strings.NewReader(prompt)
+	cmd.Env = filterEnv(os.Environ(), "CLAUDECODE")
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		logFn("[팀장] ❌ 파이프 오류")
+		return fmt.Sprintf("PIPE ERROR: %s", err)
+	}
+	cmd.Stderr = nil
+
+	if err := cmd.Start(); err != nil {
+		logFn("[팀장] ❌ 시작 오류")
+		return fmt.Sprintf("START ERROR: %s", err)
+	}
+
+	var fullResult string
+	textStarted := false
+	thinkStarted := false
+	ParseStream(stdout, StreamCallbacks{
+		OnText: func(text string) {
+			thinkStarted = false
+			if !textStarted {
+				logFn(fmt.Sprintf("[팀장] %s", text))
+				textStarted = true
+			} else {
+				logFn("\x01" + text)
+			}
+		},
+		OnThinking: func(text string) {
+			textStarted = false
+			if !thinkStarted {
+				logFn("  💭 " + text)
+				thinkStarted = true
+			} else {
+				logFn("\x01" + text)
+			}
+		},
+		OnToolUse: func(toolName string, input string) {
+			textStarted = false
+			thinkStarted = false
+			msg := "  🔧 " + toolName
+			if input != "" {
+				msg += ": " + input
+			}
+			logFn(msg)
+		},
+		OnResult: func(result string) {
+			textStarted = false
+			thinkStarted = false
+			fullResult = result
+		},
+	})
+
+	cmd.Wait()
+	result := strings.TrimSpace(fullResult)
+
+	logFn(fmt.Sprintf("\n[팀장] ✅ 세션 완료"))
+
+	return result
+}
+
+func (l *LeadAgent) buildLeadSessionPrompt(userInput string) string {
+	cliCmd := "claudestra"
+	if l.CLIPath != "" {
+		cliCmd = l.CLIPath
+	}
+
+	sessionBlock := l.buildSessionBlock()
+
+	tmpl := `당신은 소프트웨어 개발 팀의 팀장 AI입니다.
+Bash 도구를 통해 claudestra CLI로 팀을 관리하고 작업을 수행합니다.
+
+[사용 가능한 CLI 명령어]
+{CLI} team                          팀원 목록 (JSON)
+{CLI} status                        팀원 상태 확인
+{CLI} session get                   세션 메모리 조회 (JSON)
+{CLI} session update '<json>'       세션 메모리 갱신
+{CLI} issues                        미해결 이슈 목록
+{CLI} contract get                  계약서 조회
+{CLI} contract set '<yaml>'         계약서 설정
+{CLI} idea <agent>                  에이전트 이데아(역할 설명) 조회
+{CLI} output <agent>                에이전트 최근 출력 조회
+{CLI} assign <agent> '<instruction>'         동기 작업 지시 (완료까지 대기)
+{CLI} assign --async <agent> '<instruction>' 비동기 작업 지시 (job-id 반환)
+
+[작업 흐름]
+1. {CLI} team 으로 팀 구성을 확인하세요
+2. {CLI} session get 으로 프로젝트 컨텍스트를 파악하세요
+3. 사용자 요청을 분석하세요
+4. 개발 태스크가 아니면 (인사, 질문, 잡담) 직접 한국어로 응답하세요
+5. 개발 태스크이면:
+   a. 각 팀원의 역할을 {CLI} idea <agent> 로 확인하세요
+   b. 필요하면 {CLI} contract set 으로 인터페이스 계약서를 설정하세요
+   c. {CLI} assign <agent> '<instruction>' 으로 각 팀원에게 작업을 지시하세요
+   d. 의존성이 없는 작업은 --async로 병렬 실행할 수 있습니다
+   e. 모든 작업 완료 후 결과를 취합하여 최종 보고서를 작성하세요
+   f. {CLI} session update 로 세션 메모리를 갱신하세요
+
+[중요 규칙]
+- 한국어로 응답하세요
+- assign의 instruction은 간결하고 구체적으로 작성하세요
+- 작업 지시 시 핵심 구조와 주요 파일만 구현하도록 안내하세요
+- 최종 보고서에는 완료 작업 요약, 각 팀원 수행 내용, 결과 평가, 다음 단계 제안을 포함하세요
+{SESSION}
+[사용자 요청]
+{INPUT}`
+
+	result := strings.ReplaceAll(tmpl, "{CLI}", cliCmd)
+	result = strings.ReplaceAll(result, "{SESSION}", sessionBlock)
+	result = strings.ReplaceAll(result, "{INPUT}", userInput)
+	return result
 }

@@ -20,6 +20,8 @@ export function OpenProject(arg1:string):Promise<void>;
 
 export function PlanRequest(arg1:string):Promise<main.ProposalInfo>;
 
+export function RunLeadSession(arg1:string):Promise<string>;
+
 export function SelectDirectory():Promise<string>;
 
 export function SubmitRequest(arg1:string):Promise<string>;

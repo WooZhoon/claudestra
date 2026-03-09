@@ -38,6 +38,10 @@ export function PlanRequest(arg1) {
   return window['go']['main']['App']['PlanRequest'](arg1);
 }
 
+export function RunLeadSession(arg1) {
+  return window['go']['main']['App']['RunLeadSession'](arg1);
+}
+
 export function SelectDirectory() {
   return window['go']['main']['App']['SelectDirectory']();
 }
