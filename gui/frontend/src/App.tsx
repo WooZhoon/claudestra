@@ -116,6 +116,18 @@ export default function App() {
     }
   }, []);
 
+  // 선택된 에이전트 자동 갱신 (실행 중일 때 2초마다)
+  useEffect(() => {
+    if (!showDetail || !selectedAgent || !running) return;
+    const interval = setInterval(async () => {
+      try {
+        const detail = await WailsApp.GetAgentDetail(selectedAgent);
+        if (detail) setAgentDetail(detail);
+      } catch {}
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [showDetail, selectedAgent, running]);
+
   const handleInit = useCallback(async (dir: string) => {
     try {
       await WailsApp.InitProject(dir);
@@ -156,6 +168,15 @@ export default function App() {
     }
     setRunning(false);
   }, [addLog, refreshStatuses]);
+
+  const handleCancel = useCallback(async () => {
+    try {
+      await WailsApp.CancelSession();
+      addLog('text', '\n⛔ 세션 중단 요청됨');
+    } catch (e: any) {
+      addLog('text', `❌ 중단 실패: ${e}`);
+    }
+  }, [addLog]);
 
   const handleSelectDir = useCallback(async () => {
     try {
@@ -222,7 +243,7 @@ export default function App() {
         <LogPanel logs={logs} />
 
         {/* 입력 */}
-        <InputBar onSubmit={handleSubmit} disabled={running} />
+        <InputBar onSubmit={handleSubmit} onCancel={handleCancel} disabled={running} />
 
         {/* 보고서 패널 */}
         <ReportPanel

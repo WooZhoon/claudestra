@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 )
 
 // ── 세션 메모리 ──
@@ -43,6 +45,8 @@ type LeadAgent struct {
 	Agents      map[string]*Agent
 	session     *Session
 	activeLogFn LogFunc // 현재 활성화된 로그 콜백 (streaming용)
+	activeCmd   *exec.Cmd
+	cmdMu       sync.Mutex
 }
 
 // RolePlan describes a dynamically planned agent role.
@@ -155,6 +159,8 @@ func (l *LeadAgent) RunLeadSession(userInput string, logFn LogFunc) string {
 	cmd.Dir = l.WorkDir
 	cmd.Stdin = strings.NewReader(prompt)
 	cmd.Env = filterEnv(os.Environ(), "CLAUDECODE")
+	// 프로세스 그룹 설정 — Cancel 시 자식 프로세스도 함께 종료
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -167,6 +173,15 @@ func (l *LeadAgent) RunLeadSession(userInput string, logFn LogFunc) string {
 		logFn("[팀장] ❌ 시작 오류")
 		return fmt.Sprintf("START ERROR: %s", err)
 	}
+
+	l.cmdMu.Lock()
+	l.activeCmd = cmd
+	l.cmdMu.Unlock()
+	defer func() {
+		l.cmdMu.Lock()
+		l.activeCmd = nil
+		l.cmdMu.Unlock()
+	}()
 
 	var fullResult string
 	textStarted := false
@@ -209,9 +224,28 @@ func (l *LeadAgent) RunLeadSession(userInput string, logFn LogFunc) string {
 	cmd.Wait()
 	result := strings.TrimSpace(fullResult)
 
+	if result == "" {
+		logFn("\n[팀장] ⛔ 세션 중단됨")
+		return "세션이 중단되었습니다."
+	}
+
 	logFn(fmt.Sprintf("\n[팀장] ✅ 세션 완료"))
 
 	return result
+}
+
+// Cancel kills the running lead session process and all its children.
+func (l *LeadAgent) Cancel() {
+	l.cmdMu.Lock()
+	cmd := l.activeCmd
+	l.cmdMu.Unlock()
+
+	if cmd == nil || cmd.Process == nil {
+		return
+	}
+
+	// 프로세스 그룹 전체 종료 (lead Claude + 자식 claudestra assign + sub-agent Claude)
+	syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
 }
 
 func (l *LeadAgent) buildLeadSessionPrompt(userInput string) string {

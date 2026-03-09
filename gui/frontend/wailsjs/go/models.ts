@@ -7,6 +7,7 @@ export namespace main {
 	    isConsumer: boolean;
 	    instruction: string;
 	    output: string;
+	    logs: string;
 	    allowedTools: string[];
 	
 	    static createFrom(source: any = {}) {
@@ -21,6 +22,7 @@ export namespace main {
 	        this.isConsumer = source["isConsumer"];
 	        this.instruction = source["instruction"];
 	        this.output = source["output"];
+	        this.logs = source["logs"];
 	        this.allowedTools = source["allowedTools"];
 	    }
 	}
@@ -42,7 +44,6 @@ export namespace main {
 	        this.isConsumer = source["isConsumer"];
 	    }
 	}
-
 
 }
 

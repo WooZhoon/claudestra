@@ -2,10 +2,11 @@ import { useState, KeyboardEvent } from 'react';
 
 interface InputBarProps {
   onSubmit: (input: string) => void;
+  onCancel?: () => void;
   disabled: boolean;
 }
 
-export default function InputBar({ onSubmit, disabled }: InputBarProps) {
+export default function InputBar({ onSubmit, onCancel, disabled }: InputBarProps) {
   const [input, setInput] = useState('');
 
   const handleSubmit = () => {
@@ -47,22 +48,40 @@ export default function InputBar({ onSubmit, disabled }: InputBarProps) {
           outline: 'none',
         }}
       />
-      <button
-        onClick={handleSubmit}
-        disabled={disabled || !input.trim()}
-        style={{
-          padding: '10px 20px',
-          borderRadius: 8,
-          border: 'none',
-          background: disabled ? 'var(--bg-tertiary)' : 'var(--accent)',
-          color: disabled ? 'var(--text-muted)' : '#1a1b26',
-          fontSize: 14,
-          fontWeight: 600,
-          cursor: disabled ? 'not-allowed' : 'pointer',
-        }}
-      >
-        전송
-      </button>
+      {disabled ? (
+        <button
+          onClick={onCancel}
+          style={{
+            padding: '10px 20px',
+            borderRadius: 8,
+            border: 'none',
+            background: '#f7768e',
+            color: '#1a1b26',
+            fontSize: 14,
+            fontWeight: 600,
+            cursor: 'pointer',
+          }}
+        >
+          중지
+        </button>
+      ) : (
+        <button
+          onClick={handleSubmit}
+          disabled={!input.trim()}
+          style={{
+            padding: '10px 20px',
+            borderRadius: 8,
+            border: 'none',
+            background: !input.trim() ? 'var(--bg-tertiary)' : 'var(--accent)',
+            color: !input.trim() ? 'var(--text-muted)' : '#1a1b26',
+            fontSize: 14,
+            fontWeight: 600,
+            cursor: !input.trim() ? 'not-allowed' : 'pointer',
+          }}
+        >
+          전송
+        </button>
+      )}
     </div>
   );
 }

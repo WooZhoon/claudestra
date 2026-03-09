@@ -62,6 +62,15 @@ func NewAgent(config AgentConfig, lockRegistry *FileLockRegistry) *Agent {
 		LockRegistry: lockRegistry,
 		Status:       StatusIdle,
 	}
+	// 기존 status 파일이 있으면 보존 (CLI 프로세스가 업데이트했을 수 있음)
+	statusFile := filepath.Join(config.WorkDir, ".agent-status")
+	if data, err := os.ReadFile(statusFile); err == nil {
+		s := strings.TrimSpace(string(data))
+		if s != "" {
+			a.Status = AgentStatus(s)
+			return a
+		}
+	}
 	a.writeStatus(StatusIdle)
 	return a
 }
@@ -71,6 +80,7 @@ func (a *Agent) Run(instruction string, onStream ...func(string)) string {
 	a.Status = StatusRunning
 	a.LastInstruction = instruction
 	a.writeStatus(StatusRunning)
+	a.writeInstruction(instruction)
 	a.mu.Unlock()
 
 	var streamFn func(string)
@@ -280,6 +290,11 @@ func (a *Agent) buildPrompt(instruction string) string {
 func (a *Agent) writeStatus(status AgentStatus) {
 	statusFile := filepath.Join(a.Config.WorkDir, ".agent-status")
 	os.WriteFile(statusFile, []byte(string(status)), 0644)
+}
+
+func (a *Agent) writeInstruction(instruction string) {
+	instrFile := filepath.Join(a.Config.WorkDir, ".agent-instruction")
+	os.WriteFile(instrFile, []byte(instruction), 0644)
 }
 
 // filterEnv returns a copy of env with the named variable removed.

@@ -178,6 +178,7 @@ type AgentDetailInfo struct {
 	IsConsumer   bool     `json:"isConsumer"`
 	Instruction  string   `json:"instruction"`
 	Output       string   `json:"output"`
+	Logs         string   `json:"logs"` // JSONL에서 읽은 실행 로그
 	AllowedTools []string `json:"allowedTools"`
 }
 
@@ -186,15 +187,101 @@ func (a *App) GetAgentDetail(agentID string) *AgentDetailInfo {
 	if !ok {
 		return nil
 	}
+
+	// JSONL 로그에서 instruction, output, 실시간 로그 읽기
+	instruction := agent.LastInstruction
+	output := agent.Output
+	var logs string
+
+	if a.workspace != nil {
+		logPath := filepath.Join(a.workspace.LogsDir, agentID+".jsonl")
+		if entries, err := readJSONLEntries(logPath); err == nil && len(entries) > 0 {
+			// 연속된 같은 타입 청크를 합쳐서 로그 구성
+			var logLines []string
+			var lastType string
+			for _, e := range entries {
+				// 연속된 같은 타입이면 마지막 줄에 이어붙임
+				if e.Type == lastType && (e.Type == "thinking" || e.Type == "text") && len(logLines) > 0 {
+					logLines[len(logLines)-1] += e.Message
+					continue
+				}
+				lastType = e.Type
+				switch e.Type {
+				case "thinking":
+					logLines = append(logLines, "💭 "+e.Message)
+				case "tool":
+					logLines = append(logLines, "🔧 "+e.Message)
+				case "text":
+					logLines = append(logLines, e.Message)
+				case "status":
+					logLines = append(logLines, "📌 "+e.Message)
+				}
+			}
+			logs = strings.Join(logLines, "\n")
+
+			// output이 비어있으면 text 항목을 전부 합쳐서 가져오기
+			if output == "" {
+				var textParts []string
+				for _, e := range entries {
+					if e.Type == "text" {
+						textParts = append(textParts, e.Message)
+					}
+				}
+				if len(textParts) > 0 {
+					output = strings.Join(textParts, "")
+				}
+			}
+		}
+
+		// instruction 파일에서 읽기 (CLI 프로세스가 기록)
+		if instruction == "" {
+			instrFile := filepath.Join(agent.Config.WorkDir, ".agent-instruction")
+			if data, err := os.ReadFile(instrFile); err == nil {
+				instruction = strings.TrimSpace(string(data))
+			}
+		}
+	}
+
+	// status 파일에서 최신 상태 읽기 (CLI 프로세스가 업데이트했을 수 있음)
+	status := string(agent.Status)
+	statusFile := filepath.Join(agent.Config.WorkDir, ".agent-status")
+	if data, err := os.ReadFile(statusFile); err == nil {
+		s := strings.TrimSpace(string(data))
+		if s != "" {
+			status = s
+		}
+	}
+
 	return &AgentDetailInfo{
 		ID:           agent.Config.AgentID,
 		Role:         agent.Config.Role,
-		Status:       string(agent.Status),
+		Status:       status,
 		IsConsumer:   agent.Config.IsConsumer,
-		Instruction:  agent.LastInstruction,
-		Output:       agent.Output,
+		Instruction:  instruction,
+		Output:       output,
+		Logs:         logs,
 		AllowedTools: agent.Config.AllowedTools,
 	}
+}
+
+// readJSONLEntries reads log entries from a JSONL file.
+func readJSONLEntries(path string) ([]internal.LogEntry, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var entries []internal.LogEntry
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var e internal.LogEntry
+		if err := json.Unmarshal([]byte(line), &e); err == nil {
+			entries = append(entries, e)
+		}
+	}
+	return entries, nil
 }
 
 func (a *App) GetAgentStatuses() []AgentStatusInfo {
@@ -387,6 +474,15 @@ func truncate(s string, maxLen int) string {
 		return s[:maxLen] + "..."
 	}
 	return s
+}
+
+// ── 세션 취소 ──
+
+// CancelSession: 실행 중인 팀장 세션을 강제 중단합니다.
+func (a *App) CancelSession() {
+	if a.lead != nil {
+		a.lead.Cancel()
+	}
 }
 
 // ── 권한 승인/거부 ──

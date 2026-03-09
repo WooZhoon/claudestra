@@ -57,16 +57,27 @@ func isWhitelistedCommand(command string) bool {
 	// 첫 번째 토큰 추출 (파이프/세미콜론 이전)
 	firstCmd := extractFirstCommand(command)
 
-	// 화이트리스트 명령어 체크
-	for _, prefix := range whitelistedCommands {
-		if firstCmd == prefix || strings.HasPrefix(firstCmd, prefix+" ") || strings.HasPrefix(firstCmd, prefix+"/") {
+	// 첫 번째 단어 (실행 파일) 추출 — basename도 체크 (풀 경로 대응)
+	firstWord := firstCmd
+	if idx := strings.Index(firstCmd, " "); idx >= 0 {
+		firstWord = firstCmd[:idx]
+	}
+	baseName := filepath.Base(firstWord)
+
+	// 화이트리스트 명령어 체크: 명령 이름 또는 basename으로 매칭
+	for _, wl := range whitelistedCommands {
+		if baseName == wl || firstCmd == wl || strings.HasPrefix(firstCmd, wl+" ") {
 			return true
 		}
 	}
 
-	// git 읽기 전용 서브커맨드 체크
-	if strings.HasPrefix(firstCmd, "git ") {
-		gitArgs := strings.TrimPrefix(firstCmd, "git ")
+	// git 읽기 전용 서브커맨드 체크 (풀 경로 git도 대응)
+	if baseName == "git" || strings.HasPrefix(firstCmd, "git ") {
+		// "git " 이후 또는 "/usr/bin/git " 이후 추출
+		gitArgs := ""
+		if idx := strings.Index(firstCmd, "git "); idx >= 0 {
+			gitArgs = firstCmd[idx+4:]
+		}
 		for _, sub := range whitelistedGitSubcommands {
 			if gitArgs == sub || strings.HasPrefix(gitArgs, sub+" ") {
 				return true
