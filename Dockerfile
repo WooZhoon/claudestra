@@ -19,8 +19,9 @@ RUN mkdir -p /app /workspace && chown -R orchestra:orchestra /app /workspace
 
 # 소스 복사
 WORKDIR /app
-COPY --chown=orchestra:orchestra files/ /app/
+COPY --chown=orchestra:orchestra src/ /app/
 
 USER orchestra
+ENV PYTHONDONTWRITEBYTECODE=1
 
 CMD ["bash"]

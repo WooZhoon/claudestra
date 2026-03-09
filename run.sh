@@ -23,6 +23,6 @@ echo ""
 docker run -it --rm \
     -v "$HOME/.claude/.credentials.json:/home/orchestra/.claude/.credentials.json:ro" \
     -v "$HOME/.claude.json:/home/orchestra/.claude.json:ro" \
-    -v "$(pwd)/files:/app" \
+    -v "$(pwd)/src:/app" \
     "$IMAGE_NAME" \
     bash
