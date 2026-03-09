@@ -156,15 +156,12 @@ export default function App() {
         setShowProposal(true);
         setShowReport(false);
         setShowDetail(false);
-        addLog('text', '[팀장] 실행 계획을 수립했습니다. 검토 후 실행을 승인해주세요.');
+        addLog('text', '[팀장] 실행 계획을 수립했습니다. 우측 상단 [실행 계획] 버튼으로 검토하세요.');
       }
     } catch (e: any) {
       const errStr = String(e);
       if (errStr.startsWith('DIRECT_REPLY:')) {
-        const reply = errStr.slice('DIRECT_REPLY:'.length);
-        setReport(reply);
-        setShowReport(true);
-        addLog('text', '[팀장] 💬 ' + reply.slice(0, 100) + (reply.length > 100 ? '...' : ''));
+        // 스트리밍으로 이미 출력됨 — 중복 로그 방지
       } else {
         addLog('text', `❌ 오류: ${e}`);
       }
@@ -237,17 +234,35 @@ export default function App() {
             팀원 {agents.length}명 | {agents.filter(a => a.status === 'RUNNING').length}명 실행 중
           </span>
           <div style={{ display: 'flex', gap: 8 }}>
-            {report && (
+            {proposal && (
               <button
-                onClick={() => { setShowReport(!showReport); setShowDetail(false); }}
+                onClick={() => { setShowProposal(!showProposal); setShowReport(false); setShowDetail(false); }}
                 style={{
                   padding: '4px 12px',
                   borderRadius: 4,
                   border: '1px solid var(--border)',
-                  background: 'var(--bg-tertiary)',
-                  color: 'var(--accent)',
+                  background: showProposal ? 'var(--accent)' : 'var(--bg-tertiary)',
+                  color: showProposal ? '#1a1b26' : 'var(--accent)',
                   cursor: 'pointer',
                   fontSize: 12,
+                  fontWeight: showProposal ? 600 : 400,
+                }}
+              >
+                실행 계획
+              </button>
+            )}
+            {report && (
+              <button
+                onClick={() => { setShowReport(!showReport); setShowProposal(false); setShowDetail(false); }}
+                style={{
+                  padding: '4px 12px',
+                  borderRadius: 4,
+                  border: '1px solid var(--border)',
+                  background: showReport ? 'var(--accent)' : 'var(--bg-tertiary)',
+                  color: showReport ? '#1a1b26' : 'var(--accent)',
+                  cursor: 'pointer',
+                  fontSize: 12,
+                  fontWeight: showReport ? 600 : 400,
                 }}
               >
                 📋 보고서
@@ -274,7 +289,7 @@ export default function App() {
         {/* 보고서 패널 */}
         <ReportPanel
           report={report}
-          visible={showReport && !showProposal}
+          visible={showReport}
           onClose={() => setShowReport(false)}
         />
 

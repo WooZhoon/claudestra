@@ -210,6 +210,8 @@ func (a *App) PlanRequest(userInput string) (*ProposalInfo, error) {
 		}
 		a.workspace.Init(roles)
 		a.buildTeamFromPlans(plans)
+		// buildTeamFromPlans가 a.lead를 새로 생성하므로 logFn을 다시 설정
+		a.lead.SetLogFn(logFn)
 	}
 
 	// 2. 실행 계획 수립
@@ -334,6 +336,8 @@ func (a *App) SubmitRequest(userInput string) string {
 		a.workspace.SaveRolePlans(plans)
 		a.rolePlans = plans
 		a.buildTeamFromPlans(plans)
+		// buildTeamFromPlans가 a.lead를 새로 생성하므로 logFn을 다시 설정
+		a.lead.SetLogFn(logFn)
 		runtime.EventsEmit(a.ctx, "team-updated", a.GetAgentStatuses())
 	}
 

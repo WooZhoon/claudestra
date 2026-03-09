@@ -189,7 +189,7 @@ function groupLogs(logs: LogEntry[]): GroupedItem[] {
 }
 
 function getLogColor(msg: string): string {
-  if (msg.includes('❌') || msg.includes('오류')) return 'var(--error)';
+  if (msg.includes('❌')) return 'var(--error)';
   if (msg.includes('✅') || msg.includes('완료')) return 'var(--success)';
   if (msg.includes('📌') || msg.includes('📋')) return 'var(--accent)';
   if (msg.includes('⚠️')) return 'var(--warning)';
