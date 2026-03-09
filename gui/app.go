@@ -459,19 +459,34 @@ func (a *App) RunLeadSession(userInput string) string {
 	}
 
 	// fsnotify 로그 감시 시작
+	// 연속된 같은 타입 청크는 append로 이어붙임 (줄바꿈 방지)
+	var lastAgent, lastType string
 	watcher := internal.NewLogWatcher(a.workspace.LogsDir, func(entry internal.LogEntry) {
 		prefix := fmt.Sprintf("[%s] ", entry.Agent)
+		isContinuation := entry.Agent == lastAgent && entry.Type == lastType &&
+			(entry.Type == "thinking" || entry.Type == "text")
+
 		switch entry.Type {
 		case "thinking":
-			runtime.EventsEmit(a.ctx, "log", LogEvent{Type: "thinking", Message: prefix + "💭 " + entry.Message})
+			if isContinuation {
+				runtime.EventsEmit(a.ctx, "log-append", entry.Message)
+			} else {
+				runtime.EventsEmit(a.ctx, "log", LogEvent{Type: "thinking", Message: prefix + "💭 " + entry.Message})
+			}
 		case "tool":
 			runtime.EventsEmit(a.ctx, "log", LogEvent{Type: "thinking", Message: prefix + "🔧 " + entry.Message})
 		case "text":
-			runtime.EventsEmit(a.ctx, "log", LogEvent{Type: "text", Message: prefix + entry.Message})
+			if isContinuation {
+				runtime.EventsEmit(a.ctx, "log-append", entry.Message)
+			} else {
+				runtime.EventsEmit(a.ctx, "log", LogEvent{Type: "text", Message: prefix + entry.Message})
+			}
 		case "status":
 			runtime.EventsEmit(a.ctx, "log", LogEvent{Type: "text", Message: prefix + "📌 " + entry.Message})
 			runtime.EventsEmit(a.ctx, "team-updated", a.GetAgentStatuses())
 		}
+		lastAgent = entry.Agent
+		lastType = entry.Type
 	})
 	if err := watcher.Start(); err != nil {
 		logFn(fmt.Sprintf("[팀장] ⚠️ 로그 감시 시작 실패: %s", err))
