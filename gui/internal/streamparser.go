@@ -87,12 +87,12 @@ func ParseStream(reader io.Reader, cb StreamCallbacks) {
 				switch evt.Event.Delta.Type {
 				case "text_delta":
 					textBuf.WriteString(evt.Event.Delta.Text)
-					if strings.Contains(evt.Event.Delta.Text, "\n") || textBuf.Len() > 80 {
+					if strings.Contains(evt.Event.Delta.Text, "\n") {
 						flushText()
 					}
 				case "thinking_delta":
 					thinkBuf.WriteString(evt.Event.Delta.Thinking)
-					if strings.Contains(evt.Event.Delta.Thinking, "\n") || thinkBuf.Len() > 80 {
+					if strings.Contains(evt.Event.Delta.Thinking, "\n") {
 						flushThink()
 					}
 				}

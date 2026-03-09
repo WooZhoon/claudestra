@@ -953,26 +953,32 @@ var (
 )
 
 // callClaude: 읽기 전용 도구로 호출 (계획 수립, 계약서 생성, IsDevTask 등)
+// thinking만 스트리밍, 텍스트(분석/JSON 등)는 표시하지 않음
 func (l *LeadAgent) callClaude(prompt string, timeoutSec int) string {
 	return l.callClaudeWith(prompt, timeoutSec, leadToolsReadOnly)
 }
 
 // callClaudeInteract: 대화용 도구로 호출 (DirectReply 등)
+// thinking + 텍스트 모두 스트리밍 (사용자에게 보여줄 응답)
 func (l *LeadAgent) callClaudeInteract(prompt string, timeoutSec int) string {
-	return l.callClaudeWith(prompt, timeoutSec, leadToolsInteract)
+	if l.activeLogFn != nil {
+		return l.callClaudeStream(prompt, timeoutSec, leadToolsInteract, func(text string) {
+			l.activeLogFn("  " + text)
+		})
+	}
+	return l.callClaudeBlocking(prompt, leadToolsInteract)
 }
 
 // callClaudeTextOnly: 도구 없이 순수 텍스트 생성 (요약, 이슈 추출 등)
+// thinking만 스트리밍, 텍스트는 표시하지 않음
 func (l *LeadAgent) callClaudeTextOnly(prompt string, timeoutSec int) string {
 	return l.callClaudeWith(prompt, timeoutSec, leadToolsNone)
 }
 
-// callClaudeWith: 지정된 도구 세트로 Claude CLI 호출
+// callClaudeWith: 지정된 도구 세트로 Claude CLI 호출 (thinking만 스트리밍)
 func (l *LeadAgent) callClaudeWith(prompt string, timeoutSec int, tools []string) string {
 	if l.activeLogFn != nil {
-		return l.callClaudeStream(prompt, timeoutSec, tools, func(text string) {
-			l.activeLogFn("  " + text)
-		})
+		return l.callClaudeStream(prompt, timeoutSec, tools, nil)
 	}
 	return l.callClaudeBlocking(prompt, tools)
 }
@@ -999,6 +1005,7 @@ func (l *LeadAgent) callClaudeBlocking(prompt string, tools []string) string {
 }
 
 // callClaudeStream: 실시간 스트리밍
+// onText가 nil이면 thinking만 스트리밍 (계획 수립 등), non-nil이면 텍스트도 스트리밍 (대화용)
 func (l *LeadAgent) callClaudeStream(prompt string, timeoutSec int, tools []string, onText func(string)) string {
 	args := []string{"-p",
 		"--output-format", "stream-json",
@@ -1034,8 +1041,9 @@ func (l *LeadAgent) callClaudeStream(prompt string, timeoutSec int, tools []stri
 			}
 		},
 		OnThinking: func(text string) {
-			if onText != nil {
-				onText("💭 " + text)
+			// thinking은 항상 activeLogFn으로 전달
+			if l.activeLogFn != nil {
+				l.activeLogFn("  💭 " + text)
 			}
 		},
 		OnResult: func(result string) {
