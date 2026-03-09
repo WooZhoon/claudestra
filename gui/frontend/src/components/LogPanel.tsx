@@ -12,7 +12,7 @@ interface LogPanelProps {
 export default memo(function LogPanel({ logs }: LogPanelProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
-  const [thinkingCollapsed, setThinkingCollapsed] = useState(true);
+  const [collapsedGroups, setCollapsedGroups] = useState<Record<number, boolean>>({});
 
   useEffect(() => {
     const container = containerRef.current;
@@ -26,6 +26,9 @@ export default memo(function LogPanel({ logs }: LogPanelProps) {
 
   // 연속된 thinking 항목을 그룹화
   const grouped = groupLogs(logs);
+
+  // thinking 그룹 인덱스 카운터
+  let thinkingGroupIdx = 0;
 
   return (
     <div
@@ -42,12 +45,14 @@ export default memo(function LogPanel({ logs }: LogPanelProps) {
     >
       {grouped.map((item, i) => {
         if (item.kind === 'thinking-group') {
+          const gIdx = thinkingGroupIdx++;
+          const collapsed = collapsedGroups[gIdx] ?? true;
           return (
             <ThinkingGroup
               key={i}
               entries={item.entries}
-              collapsed={thinkingCollapsed}
-              onToggle={() => setThinkingCollapsed(c => !c)}
+              collapsed={collapsed}
+              onToggle={() => setCollapsedGroups(prev => ({ ...prev, [gIdx]: !collapsed }))}
             />
           );
         }
@@ -72,6 +77,11 @@ function isToolUseEntry(entry: LogEntry): boolean {
   return entry.message.includes('🔧');
 }
 
+// 📊 분석 텍스트 항목인지 체크
+function isAnalysisEntry(entry: LogEntry): boolean {
+  return entry.message.includes('📊');
+}
+
 function ThinkingGroup({
   entries,
   collapsed,
@@ -81,13 +91,15 @@ function ThinkingGroup({
   collapsed: boolean;
   onToggle: () => void;
 }) {
-  const thinkingCount = entries.filter(e => !isToolUseEntry(e)).length;
+  const thinkingCount = entries.filter(e => !isToolUseEntry(e) && !isAnalysisEntry(e)).length;
   const toolCount = entries.filter(e => isToolUseEntry(e)).length;
+  const analysisCount = entries.filter(e => isAnalysisEntry(e)).length;
 
-  let label = `💭 사고 과정 (${thinkingCount}개 청크)`;
-  if (toolCount > 0) {
-    label = `💭 사고 과정 (${thinkingCount}개 청크, 🔧 ${toolCount}개 도구 호출)`;
-  }
+  const parts: string[] = [];
+  if (thinkingCount > 0) parts.push(`${thinkingCount}개 청크`);
+  if (toolCount > 0) parts.push(`🔧 ${toolCount}개 도구 호출`);
+  if (analysisCount > 0) parts.push(`📊 분석`);
+  const label = `💭 사고 과정 (${parts.join(', ')})`;
 
   return (
     <div style={{
@@ -144,6 +156,22 @@ function ThinkingGroup({
                   borderRadius: 3,
                 }}>
                   {toolMsg}
+                </div>
+              );
+            }
+            if (isAnalysisEntry(e)) {
+              // 분석 텍스트: 일반 스타일로 표시
+              return (
+                <div key={i} style={{
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-word',
+                  color: 'var(--text-secondary)',
+                  fontStyle: 'normal',
+                  fontSize: 12,
+                  lineHeight: 1.6,
+                  padding: '4px 0',
+                }}>
+                  {e.message.replace(/^.*?📊\s*/, '')}
                 </div>
               );
             }

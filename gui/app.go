@@ -177,7 +177,7 @@ func (a *App) PlanRequest(userInput string) (*ProposalInfo, error) {
 			return
 		}
 		evtType := "text"
-		if strings.Contains(msg, "💭") || strings.Contains(msg, "🔧") {
+		if strings.Contains(msg, "💭") || strings.Contains(msg, "🔧") || strings.Contains(msg, "📊") {
 			evtType = "thinking"
 		}
 		runtime.EventsEmit(a.ctx, "log", LogEvent{Type: evtType, Message: msg})
@@ -274,7 +274,7 @@ func (a *App) ExecutePlan() string {
 			return
 		}
 		evtType := "text"
-		if strings.Contains(msg, "💭") || strings.Contains(msg, "🔧") {
+		if strings.Contains(msg, "💭") || strings.Contains(msg, "🔧") || strings.Contains(msg, "📊") {
 			evtType = "thinking"
 		}
 		runtime.EventsEmit(a.ctx, "log", LogEvent{Type: evtType, Message: msg})
@@ -316,7 +316,7 @@ func (a *App) SubmitRequest(userInput string) string {
 			return
 		}
 		evtType := "text"
-		if strings.Contains(msg, "💭") || strings.Contains(msg, "🔧") {
+		if strings.Contains(msg, "💭") || strings.Contains(msg, "🔧") || strings.Contains(msg, "📊") {
 			evtType = "thinking"
 		}
 		runtime.EventsEmit(a.ctx, "log", LogEvent{Type: evtType, Message: msg})

@@ -671,11 +671,11 @@ func (l *LeadAgent) Decompose(userInput string) []Step {
 - 세션에 미해결 이슈가 있고 "고쳐줘", "이어서" 등이면 개발 태스크.
 - 각 instruction은 간결하게 핵심만.`, leadIdea, string(agentList), contextBlock, userInput)
 
-	// thinking + 텍스트 분석 과정 모두 스트리밍
+	// thinking + 분석 텍스트 모두 스트리밍 (📊 마커로 thinking 그룹에 포함)
 	var raw string
 	if l.activeLogFn != nil {
 		raw = l.callClaudeStream(prompt, 120, leadToolsReadOnly, func(text string) {
-			l.activeLogFn("  " + text)
+			l.activeLogFn("  📊 " + text)
 		})
 	} else {
 		raw = l.callClaudeBlocking(prompt, leadToolsReadOnly)
@@ -844,11 +844,11 @@ func (l *LeadAgent) GenerateContract(userInput string, plan []Step) string {
 
 규칙: 간결하게 핵심만. 50줄 이내.`, userInput, string(planJSON), string(agentList))
 
-	// thinking + 텍스트 분석 과정 모두 스트리밍 (팀 구성과 동일)
+	// thinking + 분석 텍스트 모두 스트리밍 (📊 마커로 thinking 그룹에 포함)
 	var raw string
 	if l.activeLogFn != nil {
 		raw = l.callClaudeStream(prompt, 120, leadToolsReadOnly, func(text string) {
-			l.activeLogFn("  " + text)
+			l.activeLogFn("  📊 " + text)
 		})
 	} else {
 		raw = l.callClaudeBlocking(prompt, leadToolsReadOnly)
