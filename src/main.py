@@ -20,6 +20,23 @@ from workspace  import Workspace, CONSUMER_ROLES
 from file_lock  import FileLockRegistry
 
 
+# ── 역할별 허용 도구 ────────────────────────────────────────────────
+
+# Producer (코드 작성자): 파일 읽기/쓰기/검색 + Bash
+PRODUCER_TOOLS = ["Read", "Write", "Edit", "Glob", "Grep", "Bash"]
+
+# Consumer (리뷰어 등): 읽기 전용 — 코드를 수정하지 못하게 제한
+CONSUMER_TOOLS = ["Read", "Glob", "Grep"]
+
+ROLE_TOOLS: dict[str, list[str]] = {
+    "backend":    PRODUCER_TOOLS,
+    "frontend":   PRODUCER_TOOLS,
+    "db":         PRODUCER_TOOLS,
+    "reviewer":   CONSUMER_TOOLS,
+    "doc_writer": CONSUMER_TOOLS + ["Write"],  # 문서 작성만 허용
+}
+
+
 # ── 팩토리: 에이전트 생성 ──────────────────────────────────────────
 
 def build_team(workspace: Workspace, roles: list[str]) -> tuple[LeadAgent, dict]:
@@ -39,12 +56,16 @@ def build_team(workspace: Workspace, roles: list[str]) -> tuple[LeadAgent, dict]
         if workspace.is_consumer(role):
             read_refs = workspace.get_producer_dirs(exclude_role=role)
 
+        # 역할별 허용 도구 (미등록 역할은 제한 없음)
+        allowed_tools = ROLE_TOOLS.get(role, [])
+
         config = AgentConfig(
-            agent_id  = role,
-            role      = role,
-            idea      = idea,
-            work_dir  = agent_dir,
-            read_refs = read_refs,
+            agent_id      = role,
+            role          = role,
+            idea          = idea,
+            work_dir      = agent_dir,
+            read_refs     = read_refs,
+            allowed_tools = allowed_tools,
         )
         agent = Agent(config, lock_registry=lock_registry)
         agents[role] = agent

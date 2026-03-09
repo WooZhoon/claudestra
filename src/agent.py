@@ -23,12 +23,13 @@ class AgentStatus(Enum):
 
 @dataclass
 class AgentConfig:
-    agent_id:   str
-    role:       str
-    idea:       str          # 시스템 프롬프트 (이데아)
-    work_dir:   Path
-    read_refs:  list[Path] = field(default_factory=list)  # 읽기 전용 참조 경로
-    contract:   str = ""     # 인터페이스 계약서
+    agent_id:       str
+    role:           str
+    idea:           str          # 시스템 프롬프트 (이데아)
+    work_dir:       Path
+    read_refs:      list[Path] = field(default_factory=list)  # 읽기 전용 참조 경로
+    contract:       str = ""     # 인터페이스 계약서
+    allowed_tools:  list[str] = field(default_factory=list)   # 허용 도구 목록 (빈 = 제한 없음)
 
 
 class Agent:
@@ -79,8 +80,13 @@ class Agent:
         print(f"\n[{self.config.role}] 🚀 시작: {instruction[:60]}...")
 
         try:
+            cmd = ["claude", "--print", "--dangerously-skip-permissions"]
+            if self.config.allowed_tools:
+                cmd += ["--allowedTools", ",".join(self.config.allowed_tools)]
+            cmd.append(prompt)
+
             result = subprocess.run(
-                ["claude", "--print", "--dangerously-skip-permissions", prompt],
+                cmd,
                 cwd=str(self.config.work_dir),
                 capture_output=True,
                 text=True,
